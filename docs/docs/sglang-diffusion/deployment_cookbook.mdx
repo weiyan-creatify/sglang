@@ -103,7 +103,7 @@ See [OpenAI API: Served model name](/docs/sglang-diffusion/api/openai_api#served
 
 ## Cold Start
 
-A fresh container has no compiled kernels. JIT CUDA, Triton and CuTe kernels are built on first use and cached on disk, so the first request waits for the compiler before its first denoising step. A startup warmup moves that wait from the first request to the server start; it does not remove it. A worker that starts with every traffic burst pays it on every start.
+A fresh container has no compiled kernels. JIT CUDA, Triton and CuTe kernels are built on first use and cached on disk, so the first request waits for the compiler before its first denoising step. A startup warmup moves that wait from the first request to the server start; it does not remove it. A worker that starts with every traffic burst pays it on every start. On MiniMax-H3 on one B200, the first request reached its first denoising step 13.6 s after the server was ready with an empty cache, and 2.2 s with the cache in the image.
 
 Build the cache once and ship it in the image:
 
@@ -112,7 +112,7 @@ Build the cache once and ship it in the image:
 
 The caches live under `SGLANG_CACHE_DIR` (default `~/.cache/sglang`): `cute_aot/`, `triton/`, `inductor/`, and `nv/` for the CUDA driver's own cache. SGLang's JIT kernels are in `~/.cache/sglang/jit`, set by `SGLANG_JIT_CACHE_DIR`, which does not follow `SGLANG_CACHE_DIR`: set both when you move the root. See [Environment Variables](/docs/references/environment_variables).
 
-- Keep the directory on the image's local disk. A kernel cache is thousands of small files, and on a network volume each first open is a round trip.
+- Build and keep the directory on local disk. A kernel cache is thousands of small files, and on a network volume each first open is a round trip.
 - A cache is reused only where it was built for: the same GPU architecture, driver and installed packages. Rebuild it when the image changes; a miss compiles as before.
 - A configuration the warm-up did not cover compiles on its first request as before.
 
