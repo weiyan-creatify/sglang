@@ -99,6 +99,11 @@ description: "Configure SGLang diffusion behavior with environment variables."
       <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.02)"}}>Use Run:AI model streamer for model loading</td>
     </tr>
     <tr>
+      <td style={{padding: "9px 12px", fontWeight: 500, backgroundColor: "rgba(255,255,255,0.02)"}}><code>SGLANG_DIFFUSION_USE_PINNED_WEIGHT_READER</code></td>
+      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>false</td>
+      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.02)"}}>Read loads that go straight to the GPU (<code>--direct-gpu-weight-loading</code>, <code>--component-direct-gpu-weight-loading.*</code>) through pinned buffers on parallel threads instead of the Run:AI streamer or the mapping. Fastest when the checkpoint is in the page cache.</td>
+    </tr>
+    <tr>
       <td style={{padding: "9px 12px", fontWeight: 500, backgroundColor: "rgba(255,255,255,0.02)"}}><code>SGLANG_DIFFUSION_CONVROT_INT8_BACKEND</code></td>
       <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}><code>auto</code></td>
       <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.02)"}}>Kernel backend for <code>convrot_int8</code>: <code>auto</code> takes SGLang's JIT-compiled ConvRot ops where they build and run (CC 9.0, 10.0, 12.0, 12.1 with nvcc) and <code>comfy_kitchen</code> otherwise; <code>jit</code> or <code>comfy_kitchen</code> forces one.</td>

@@ -135,6 +135,7 @@ if TYPE_CHECKING:
     SGLANG_CACHE_DIT_SECONDARY_DMD_SVD_PRECISION: str = "medium"
     # model loading
     SGLANG_USE_RUNAI_MODEL_STREAMER: bool = True
+    SGLANG_DIFFUSION_USE_PINNED_WEIGHT_READER: bool = False
     SGLANG_LINGBOT_ENABLE_INTERACTIVE_KV_WINDOW: bool = False
     SGLANG_LINGBOT_LAZY_VAE_ENCODE_BLACK_FRAMES: int | None = None
     SGLANG_DIFFUSION_FLASHINFER_FP4_GEMM_BACKEND: str | None = None
@@ -511,6 +512,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # model loading
     "SGLANG_USE_RUNAI_MODEL_STREAMER": _lazy_bool(
         "SGLANG_USE_RUNAI_MODEL_STREAMER", "true"
+    ),
+    # Device-bound loads read through pinned buffers on parallel threads
+    # instead of the Run:ai streamer or the mapping. Opt-in, off by default.
+    "SGLANG_DIFFUSION_USE_PINNED_WEIGHT_READER": _lazy_bool(
+        "SGLANG_DIFFUSION_USE_PINNED_WEIGHT_READER"
     ),
     "SGLANG_LINGBOT_ENABLE_INTERACTIVE_KV_WINDOW": _lazy_bool(
         "SGLANG_LINGBOT_ENABLE_INTERACTIVE_KV_WINDOW"

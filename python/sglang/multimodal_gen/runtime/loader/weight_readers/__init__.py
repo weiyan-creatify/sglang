@@ -5,6 +5,9 @@ from sglang.multimodal_gen import envs
 from sglang.multimodal_gen.runtime.loader.weight_readers.base import (
     WeightReader,
 )
+from sglang.multimodal_gen.runtime.loader.weight_readers.pinned_parallel import (
+    PinnedParallelReader,
+)
 from sglang.multimodal_gen.runtime.loader.weight_readers.runai_streamer import (
     RunaiStreamerReader,
 )
@@ -16,7 +19,11 @@ from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 logger = init_logger(__name__)
 
 # The fallback is last and always available, so selection cannot come up empty.
-_READERS: tuple[type, ...] = (RunaiStreamerReader, SafetensorsMmapReader)
+_READERS: tuple[type, ...] = (
+    RunaiStreamerReader,
+    PinnedParallelReader,
+    SafetensorsMmapReader,
+)
 FALLBACK_READER = SafetensorsMmapReader
 
 
@@ -28,13 +35,15 @@ def select_weight_reader(
     *,
     requested: str | None = None,
     needs_key_filter: bool = False,
+    device_bound: bool = False,
 ) -> WeightReader:
     """Pick a reader, honouring an explicit request where it can be honoured.
 
     `requested` names a reader; None means take the environment's preference.
     A reader that cannot skip keys is passed over when the caller needs to,
     because reading the whole checkpoint to discard most of it is worse than
-    reading the part that was asked for more slowly.
+    reading the part that was asked for more slowly. The pinned reader only
+    loads onto a device, so it is preferred only for device-bound loads.
     """
     if requested is not None:
         chosen = next((b for b in _READERS if b.name == requested), None)
@@ -43,6 +52,8 @@ def select_weight_reader(
                 f"unknown weight reader {requested!r}; "
                 f"available: {available_reader_names()}"
             )
+    elif device_bound and envs.SGLANG_DIFFUSION_USE_PINNED_WEIGHT_READER:
+        chosen = PinnedParallelReader
     elif envs.SGLANG_USE_RUNAI_MODEL_STREAMER and RunaiStreamerReader.is_available():
         chosen = RunaiStreamerReader
     else:
@@ -67,6 +78,7 @@ def select_weight_reader(
 
 __all__ = [
     "FALLBACK_READER",
+    "PinnedParallelReader",
     "RunaiStreamerReader",
     "SafetensorsMmapReader",
     "WeightReader",
