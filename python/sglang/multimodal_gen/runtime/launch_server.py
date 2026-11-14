@@ -1,7 +1,5 @@
 # Copied and adapted from: https://github.com/hao-ai-lab/FastVideo
 
-import glob
-import json
 import multiprocessing as mp
 import os
 import sys
@@ -18,9 +16,6 @@ from sglang.multimodal_gen.runtime.disaggregation.roles import RoleType
 from sglang.multimodal_gen.runtime.entrypoints.control_requests import ShutdownReq
 from sglang.multimodal_gen.runtime.entrypoints.http_server import create_app
 from sglang.multimodal_gen.runtime.loader import weight_prefetch
-from sglang.multimodal_gen.runtime.managers.memory_managers.component_loading_order import (
-    list_component_safetensors_files,
-)
 from sglang.multimodal_gen.runtime.managers.worker_bootstrap import (
     SchedulerProcessSpec,
     ServerArgsPayload,
@@ -201,69 +196,6 @@ def _start_scheduler_processes(
     return processes
 
 
-def _pipeline_root(server_args: ServerArgs) -> str | None:
-    """The local directory whose model_index.json the pipeline will load, if known.
-
-    A repository may keep several pipelines in partitions, and the pipeline
-    class picks one. The launcher only follows a choice it can read off the
-    arguments: reading another partition would fill memory with unused weights.
-    """
-    root = server_args.model_path
-    if not os.path.isdir(root):
-        from huggingface_hub import snapshot_download
-        from huggingface_hub.errors import LocalEntryNotFoundError
-
-        try:
-            root = snapshot_download(
-                root, revision=server_args.revision, local_files_only=True
-            )
-        except (LocalEntryNotFoundError, OSError, ValueError):
-            return None
-
-    def has_index(directory: str) -> bool:
-        return os.path.isfile(os.path.join(directory, "model_index.json"))
-
-    if server_args.model_subfolder is not None:
-        chosen = os.path.join(root, server_args.model_subfolder)
-        return chosen if has_index(chosen) else None
-    partitions = [
-        name for name in sorted(os.listdir(root)) if has_index(os.path.join(root, name))
-    ]
-    if not partitions:
-        return root if has_index(root) else None
-    variant = (server_args.model_variant or "").lower()
-    named = [name for name in partitions if name.lower() == variant]
-    return os.path.join(root, named[0]) if len(named) == 1 else None
-
-
-def _pipeline_weight_files(server_args: ServerArgs) -> list[str]:
-    """Local safetensors files of the components the pipeline index declares.
-
-    An approximation the loaders refine. It never downloads, and a component
-    whose override is not a local path is left out.
-    """
-    root = _pipeline_root(server_args)
-    if root is None:
-        return []
-    with open(os.path.join(root, "model_index.json")) as f:
-        model_index = json.load(f)
-
-    overrides = {**server_args.component_paths, **server_args.component_weights_paths}
-    if server_args.transformer_weights_path is not None:
-        overrides["transformer"] = server_args.transformer_weights_path
-    files: list[str] = []
-    for name, spec in model_index.items():
-        if name.startswith("_") or not isinstance(spec, list) or spec[0] is None:
-            continue
-        component = overrides.get(name) or os.path.join(root, name)
-        files.extend(
-            list_component_safetensors_files(component)
-            # Some components keep their weights one folder down.
-            or sorted(glob.glob(os.path.join(component, "*", "*.safetensors")))
-        )
-    return files
-
-
 def _log_weight_prefetch_done(bytes_read: int, seconds: float) -> None:
     logger.info(
         "[server-load] weight prefetch done: %.1f GB in %.1f s (%.1f GB/s)",
@@ -277,7 +209,16 @@ def _start_weight_prefetch(server_args: ServerArgs) -> None:
     """Warm the page cache with the pipeline's weights while the workers start."""
     if not server_args.weight_loader_prefetch_checkpoints:
         return
-    files = _pipeline_weight_files(server_args)
+    overrides = {**server_args.component_paths, **server_args.component_weights_paths}
+    if server_args.transformer_weights_path is not None:
+        overrides["transformer"] = server_args.transformer_weights_path
+    files = weight_prefetch.pipeline_weight_files(
+        server_args.model_path,
+        revision=server_args.revision,
+        model_subfolder=server_args.model_subfolder,
+        model_variant=server_args.model_variant,
+        component_overrides=overrides,
+    )
     planned_bytes = weight_prefetch.start_weight_prefetch(
         files, on_done=_log_weight_prefetch_done
     )
@@ -289,8 +230,8 @@ def _start_weight_prefetch(server_args: ServerArgs) -> None:
         )
     else:
         logger.info(
-            "[server-load] weight prefetch skipped: no local safetensors weights, "
-            "or they exceed the host memory headroom"
+            "[server-load] weight prefetch skipped: no local safetensors weights "
+            "to read, or they exceed the host memory headroom"
         )
 
 

@@ -3,12 +3,10 @@
 import os
 import subprocess
 import threading
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
-from sglang.multimodal_gen.runtime import launch_server
 from sglang.multimodal_gen.runtime.loader import weight_prefetch
 
 
@@ -78,17 +76,15 @@ def test_plan_follows_the_pipeline_index_and_local_overrides(tmp_path):
         ' "vae": ["diffusers", "VAE"], "text_encoder": ["transformers", "Encoder"],'
         ' "image_encoder": [null, null], "scheduler": ["diffusers", "Scheduler"]}'
     )
-    server_args = SimpleNamespace(
-        model_path=str(tmp_path),
+    files = weight_prefetch.pipeline_weight_files(
+        str(tmp_path),
         revision=None,
         model_subfolder=None,
         model_variant=None,
-        component_paths={"vae": "owner/repo/vae"},
-        component_weights_paths={"text_encoder": str(override)},
-        transformer_weights_path=None,
+        component_overrides={"vae": "owner/repo/vae", "text_encoder": str(override)},
     )
 
-    assert launch_server._pipeline_weight_files(server_args) == [
+    assert files == [
         str(tmp_path / "transformer" / "model.safetensors"),
         str(override),
     ]
@@ -105,18 +101,14 @@ def test_plan_reads_a_partition_only_when_the_arguments_name_it(tmp_path):
         (weights / "model.safetensors").write_bytes(b"x")
         (tmp_path / partition / "model_index.json").write_text(index)
 
-    def plan(**selection):
-        server_args = SimpleNamespace(
-            model_path=str(tmp_path),
+    def plan(*, model_subfolder=None, model_variant=None):
+        return weight_prefetch.pipeline_weight_files(
+            str(tmp_path),
             revision=None,
-            model_subfolder=None,
-            model_variant=None,
-            component_paths={},
-            component_weights_paths={},
-            transformer_weights_path=None,
+            model_subfolder=model_subfolder,
+            model_variant=model_variant,
+            component_overrides={},
         )
-        vars(server_args).update(selection)
-        return launch_server._pipeline_weight_files(server_args)
 
     nested = str(tmp_path / "FL2VA" / "transformer" / "source" / "model.safetensors")
     assert plan(model_variant="fl2va") == [nested]

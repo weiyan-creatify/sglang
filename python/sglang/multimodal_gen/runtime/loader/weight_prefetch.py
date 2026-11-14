@@ -13,6 +13,7 @@ the rest of sglang: helpers run it as a plain script, without site-packages.
 
 from __future__ import annotations
 
+import glob
 import json
 import os
 import subprocess
@@ -29,6 +30,87 @@ _PROCESSES = 8
 _THREADS_PER_PROCESS = 4
 # Arbitrary; leaves room for the workers' own host memory while they load.
 _MAX_PAGE_CACHE_FRACTION = 0.8
+
+
+def _pipeline_root(
+    model_path: str,
+    *,
+    revision: str | None,
+    model_subfolder: str | None,
+    model_variant: str | None,
+) -> str | None:
+    """The local directory whose model_index.json the pipeline will load, if known.
+
+    A repository may keep several pipelines in partitions, and the pipeline
+    class picks one. Only a choice the arguments spell out is followed: reading
+    another partition would fill memory with weights nobody loads.
+    """
+    root = model_path
+    if not os.path.isdir(root):
+        # Only the launcher gets here; the helper script never needs site-packages.
+        from huggingface_hub import snapshot_download
+        from huggingface_hub.errors import LocalEntryNotFoundError
+
+        try:
+            root = snapshot_download(root, revision=revision, local_files_only=True)
+        except (LocalEntryNotFoundError, OSError, ValueError):
+            return None
+
+    def has_index(directory: str) -> bool:
+        return os.path.isfile(os.path.join(directory, "model_index.json"))
+
+    if model_subfolder is not None:
+        chosen = os.path.join(root, model_subfolder)
+        return chosen if has_index(chosen) else None
+    partitions = [
+        name for name in sorted(os.listdir(root)) if has_index(os.path.join(root, name))
+    ]
+    if not partitions:
+        return root if has_index(root) else None
+    named = [
+        name for name in partitions if name.lower() == (model_variant or "").lower()
+    ]
+    return os.path.join(root, named[0]) if len(named) == 1 else None
+
+
+def pipeline_weight_files(
+    model_path: str,
+    *,
+    revision: str | None,
+    model_subfolder: str | None,
+    model_variant: str | None,
+    component_overrides: dict[str, str],
+) -> list[str]:
+    """Local safetensors files of the components the pipeline index declares.
+
+    An approximation the loaders refine. It never downloads, and a component
+    whose override is not a local path is left out.
+    """
+    from sglang.multimodal_gen.runtime.managers.memory_managers.component_loading_order import (
+        list_component_safetensors_files,
+    )
+
+    root = _pipeline_root(
+        model_path,
+        revision=revision,
+        model_subfolder=model_subfolder,
+        model_variant=model_variant,
+    )
+    if root is None:
+        return []
+    with open(os.path.join(root, "model_index.json")) as f:
+        model_index = json.load(f)
+    files: list[str] = []
+    for name, spec in model_index.items():
+        if name.startswith("_") or not isinstance(spec, list) or spec[0] is None:
+            continue
+        component = component_overrides.get(name) or os.path.join(root, name)
+        files.extend(
+            list_component_safetensors_files(component)
+            # Some components keep their weights one folder down.
+            or sorted(glob.glob(os.path.join(component, "*", "*.safetensors")))
+        )
+    return files
 
 
 def _host_memory_headroom_bytes() -> int | None:
