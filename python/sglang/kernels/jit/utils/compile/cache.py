@@ -491,13 +491,16 @@ def _to_entries(
     inputs ``build_key`` covers.
     """
     seen: Dict[Tuple[str, str], _DepEntry] = {}
+    # Dependencies are compared resolved; a cache root behind a symlink would
+    # otherwise record this build's staging files and never verify again.
+    build_root = build_dir.resolve()
     for candidate in dependencies:
         path = (
             candidate.resolve()
             if candidate.is_absolute()
             else (build_dir / candidate).resolve()
         )
-        if path.is_relative_to(build_dir) or not path.is_file():
+        if path.is_relative_to(build_root) or not path.is_file():
             continue
         digest = _file_digest(path)
         if digest is None:
