@@ -307,14 +307,16 @@ class TestOotRuntimeHooks(unittest.TestCase):
             group_coordinator._resolve_all_to_all_communicator_cls()
 
     def test_platform_controls_distributed_device_id(self):
+        # Binding the device makes the backend set up its communicator eagerly,
+        # which a single rank never uses.
         device_id = object()
-        for supported in (False, True):
+        for supported, world_size in ((False, 2), (True, 2), (True, 1)):
             platform = MagicMock(device_name="test")
             platform.get_torch_distributed_backend_str.return_value = "gloo"
             platform.supports_distributed_device_id.return_value = supported
 
             with (
-                self.subTest(supported=supported),
+                self.subTest(supported=supported, world_size=world_size),
                 patch.object(runtime_platforms, "_current_platform", platform),
                 patch.object(parallel_state, "_WORLD", SimpleNamespace(world_size=1)),
                 patch.object(
@@ -332,10 +334,12 @@ class TestOotRuntimeHooks(unittest.TestCase):
                 ),
                 patch.object(parallel_state, "_sync_srt_world_group"),
             ):
-                parallel_state.init_distributed_environment(device_id=device_id)
+                parallel_state.init_distributed_environment(
+                    world_size=world_size, device_id=device_id
+                )
 
             kwargs = init_process_group.call_args.kwargs
-            if supported:
+            if supported and world_size > 1:
                 self.assertIs(kwargs["device_id"], device_id)
             else:
                 self.assertNotIn("device_id", kwargs)

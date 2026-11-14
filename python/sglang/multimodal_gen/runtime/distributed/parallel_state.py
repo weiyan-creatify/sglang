@@ -305,9 +305,11 @@ def init_distributed_environment(
             "distributed environment"
         )
 
+        # A bound device makes NCCL create its communicator inside this call
+        # (0.25-0.3 s on B200); a single rank has no peer to set one up with.
         extra_args = (
             dict(device_id=device_id)
-            if current_platform.supports_distributed_device_id()
+            if current_platform.supports_distributed_device_id() and world_size > 1
             else {}
         )
 
