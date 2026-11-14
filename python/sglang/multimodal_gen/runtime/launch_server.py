@@ -1,5 +1,6 @@
 # Copied and adapted from: https://github.com/hao-ai-lab/FastVideo
 
+import json
 import multiprocessing as mp
 import os
 import sys
@@ -15,6 +16,10 @@ from sglang.multimodal_gen.runtime.disaggregation.orchestrator import (
 from sglang.multimodal_gen.runtime.disaggregation.roles import RoleType
 from sglang.multimodal_gen.runtime.entrypoints.control_requests import ShutdownReq
 from sglang.multimodal_gen.runtime.entrypoints.http_server import create_app
+from sglang.multimodal_gen.runtime.loader import weight_prefetch
+from sglang.multimodal_gen.runtime.managers.memory_managers.component_loading_order import (
+    list_component_safetensors_files,
+)
 from sglang.multimodal_gen.runtime.managers.worker_bootstrap import (
     SchedulerProcessSpec,
     ServerArgsPayload,
@@ -195,6 +200,76 @@ def _start_scheduler_processes(
     return processes
 
 
+def _pipeline_weight_files(server_args: ServerArgs) -> list[str]:
+    """Local safetensors files of the components the pipeline index declares.
+
+    An approximation the loaders refine. It never downloads, and a component
+    whose override is not a local path is left out.
+    """
+    root = server_args.model_path
+    if not os.path.isdir(root):
+        from huggingface_hub import snapshot_download
+        from huggingface_hub.errors import LocalEntryNotFoundError
+
+        try:
+            root = snapshot_download(
+                root, revision=server_args.revision, local_files_only=True
+            )
+        except (LocalEntryNotFoundError, OSError, ValueError):
+            return []
+    if server_args.model_subfolder is not None:
+        root = os.path.join(root, server_args.model_subfolder)
+    index_path = os.path.join(root, "model_index.json")
+    if not os.path.isfile(index_path):
+        return []
+    with open(index_path) as f:
+        model_index = json.load(f)
+
+    overrides = {**server_args.component_paths, **server_args.component_weights_paths}
+    if server_args.transformer_weights_path is not None:
+        overrides["transformer"] = server_args.transformer_weights_path
+    files: list[str] = []
+    for name, spec in model_index.items():
+        if name.startswith("_") or not isinstance(spec, list) or spec[0] is None:
+            continue
+        files.extend(
+            list_component_safetensors_files(
+                overrides.get(name) or os.path.join(root, name)
+            )
+        )
+    return files
+
+
+def _log_weight_prefetch_done(bytes_read: int, seconds: float) -> None:
+    logger.info(
+        "[server-load] weight prefetch done: %.1f GB in %.1f s (%.1f GB/s)",
+        bytes_read / 1e9,
+        seconds,
+        bytes_read / 1e9 / max(seconds, 1e-9),
+    )
+
+
+def _start_weight_prefetch(server_args: ServerArgs) -> None:
+    """Warm the page cache with the pipeline's weights while the workers start."""
+    if not server_args.weight_loader_prefetch_checkpoints:
+        return
+    files = _pipeline_weight_files(server_args)
+    planned_bytes = weight_prefetch.start_weight_prefetch(
+        files, on_done=_log_weight_prefetch_done
+    )
+    if planned_bytes:
+        logger.info(
+            "[server-load] weight prefetch: %d files, %.1f GB",
+            len(files),
+            planned_bytes / 1e9,
+        )
+    else:
+        logger.info(
+            "[server-load] weight prefetch skipped: no local safetensors weights, "
+            "or they exceed the host memory headroom"
+        )
+
+
 def launch_server(server_args: ServerArgs, launch_http_server: bool = True):
     """
     Args:
@@ -218,6 +293,7 @@ def launch_server(server_args: ServerArgs, launch_http_server: bool = True):
     local_num_gpus = num_gpus // nnodes
     rank_offset = node_rank * local_num_gpus
     server_args_payload = ServerArgsPayload.capture(server_args)
+    _start_weight_prefetch(server_args)
     processes = _start_scheduler_processes(
         server_args_payload,
         [(i, rank_offset + i) for i in range(local_num_gpus)],
