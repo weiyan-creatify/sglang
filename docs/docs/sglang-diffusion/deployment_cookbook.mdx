@@ -101,6 +101,21 @@ The resolved public name follows `--served-model-name`, then `--model-id`, then 
 
 See [OpenAI API: Served model name](/docs/sglang-diffusion/api/openai_api#served-model-name) for discovery and retrieval examples.
 
+## Cold Start
+
+A fresh container has no compiled kernels. JIT CUDA, Triton and CuTe kernels are built on first use and cached on disk, so the first request waits for the compiler before its first denoising step. A startup warmup moves that wait from the first request to the server start; it does not remove it. A worker that starts with every traffic burst pays it on every start.
+
+Build the cache once and ship it in the image:
+
+1. Start the server in a container of the serving image, on the GPU model you deploy, and send one request for each configuration you serve (task, resolution, frame count).
+2. Copy the cache directory into the image at the same path.
+
+The caches live under `SGLANG_CACHE_DIR` (default `~/.cache/sglang`): `cute_aot/`, `triton/`, `inductor/`, and `nv/` for the CUDA driver's own cache. SGLang's JIT kernels are in `~/.cache/sglang/jit`, set by `SGLANG_JIT_CACHE_DIR`, which does not follow `SGLANG_CACHE_DIR`: set both when you move the root. See [Environment Variables](/docs/references/environment_variables).
+
+- Keep the directory on the image's local disk. A kernel cache is thousands of small files, and on a network volume each first open is a round trip.
+- A cache is reused only where it was built for: the same GPU architecture, driver and installed packages. Rebuild it when the image changes; a miss compiles as before.
+- A configuration the warm-up did not cover compiles on its first request as before.
+
 ## Performance Modes
 
 `--performance-mode` applies safe presets without overriding explicit offload, FSDP, or parallelism flags. `auto` is the default. Use `manual` when you need to keep performance-related server args under explicit user control. `--mode` is a short alias.
