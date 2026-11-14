@@ -69,11 +69,15 @@ from sglang.srt.layers.linear import LinearBase as SrtLinearBase
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-@pytest.mark.parametrize("starts_on_cpu", [False, True])
-def test_encoder_load_copies_host_checkpoint_into_final_parameters(
-    tmp_path, single_process_model_parallel, starts_on_cpu
+@pytest.mark.parametrize(
+    "starts_on_cpu,direct_gpu", [(False, False), (True, False), (False, True)]
+)
+def test_encoder_load_copies_checkpoint_into_final_parameters(
+    tmp_path, single_process_model_parallel, starts_on_cpu, direct_gpu
 ):
-    """GPU-resident encoders must not stage a second full GPU weight tensor."""
+    """GPU-resident encoders must not stage a second full GPU weight tensor;
+    a direct GPU load reads the checkpoint on the device and fills the same
+    parameters."""
     hf_config = transformers.T5Config(
         vocab_size=64, d_model=32, d_kv=8, d_ff=64, num_layers=1, num_heads=4
     )
@@ -87,8 +91,8 @@ def test_encoder_load_copies_host_checkpoint_into_final_parameters(
 
     def check_checkpoint_device(self, *args, **kwargs):
         for name, tensor in read_weights(self, *args, **kwargs):
-            assert tensor.device.type == "cpu"
-            torch.testing.assert_close(tensor, weights[name], rtol=0, atol=0)
+            assert tensor.device.type == ("cuda" if direct_gpu else "cpu")
+            torch.testing.assert_close(tensor.cpu(), weights[name], rtol=0, atol=0)
             yield name, tensor
 
     with mock.patch.object(
@@ -100,6 +104,7 @@ def test_encoder_load_copies_host_checkpoint_into_final_parameters(
             SimpleNamespace(pipeline_config=None),
             dtype="bf16",
             component_starts_on_cpu=starts_on_cpu,
+            direct_gpu_weight_loading=direct_gpu,
         )
     for name, parameter in loaded.named_parameters():
         if ".qkv_proj." in name:

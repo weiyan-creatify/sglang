@@ -213,6 +213,11 @@ module, rather than materializing a complete CPU state dict. It rejects custom
 Diffusers `auto_map` classes, quantized checkpoints, tied state entries, and
 any component-offload or layerwise-offload placement.
 
+Native text encoders (`text_encoder`, `text_encoder_2`, ...) accept the same
+selector for unquantized checkpoints: the loader reads each tensor on the GPU
+and copies it into its allocated parameter, so only the tensors in flight are
+held twice.
+
 Component overrides accept a local component directory, a standalone Hub
 repository, or a Hub component subfolder written as `owner/repo/subfolder`.
 For transformer and native encoder loaders, an explicit weight filename keeps
