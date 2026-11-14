@@ -1,5 +1,6 @@
 # Copied and adapted from: https://github.com/hao-ai-lab/FastVideo
 
+import glob
 import json
 import multiprocessing as mp
 import os
@@ -200,11 +201,12 @@ def _start_scheduler_processes(
     return processes
 
 
-def _pipeline_weight_files(server_args: ServerArgs) -> list[str]:
-    """Local safetensors files of the components the pipeline index declares.
+def _pipeline_root(server_args: ServerArgs) -> str | None:
+    """The local directory whose model_index.json the pipeline will load, if known.
 
-    An approximation the loaders refine. It never downloads, and a component
-    whose override is not a local path is left out.
+    A repository may keep several pipelines in partitions, and the pipeline
+    class picks one. The launcher only follows a choice it can read off the
+    arguments: reading another partition would fill memory with unused weights.
     """
     root = server_args.model_path
     if not os.path.isdir(root):
@@ -216,13 +218,34 @@ def _pipeline_weight_files(server_args: ServerArgs) -> list[str]:
                 root, revision=server_args.revision, local_files_only=True
             )
         except (LocalEntryNotFoundError, OSError, ValueError):
-            return []
+            return None
+
+    def has_index(directory: str) -> bool:
+        return os.path.isfile(os.path.join(directory, "model_index.json"))
+
     if server_args.model_subfolder is not None:
-        root = os.path.join(root, server_args.model_subfolder)
-    index_path = os.path.join(root, "model_index.json")
-    if not os.path.isfile(index_path):
+        chosen = os.path.join(root, server_args.model_subfolder)
+        return chosen if has_index(chosen) else None
+    partitions = [
+        name for name in sorted(os.listdir(root)) if has_index(os.path.join(root, name))
+    ]
+    if not partitions:
+        return root if has_index(root) else None
+    variant = (server_args.model_variant or "").lower()
+    named = [name for name in partitions if name.lower() == variant]
+    return os.path.join(root, named[0]) if len(named) == 1 else None
+
+
+def _pipeline_weight_files(server_args: ServerArgs) -> list[str]:
+    """Local safetensors files of the components the pipeline index declares.
+
+    An approximation the loaders refine. It never downloads, and a component
+    whose override is not a local path is left out.
+    """
+    root = _pipeline_root(server_args)
+    if root is None:
         return []
-    with open(index_path) as f:
+    with open(os.path.join(root, "model_index.json")) as f:
         model_index = json.load(f)
 
     overrides = {**server_args.component_paths, **server_args.component_weights_paths}
@@ -232,10 +255,11 @@ def _pipeline_weight_files(server_args: ServerArgs) -> list[str]:
     for name, spec in model_index.items():
         if name.startswith("_") or not isinstance(spec, list) or spec[0] is None:
             continue
+        component = overrides.get(name) or os.path.join(root, name)
         files.extend(
-            list_component_safetensors_files(
-                overrides.get(name) or os.path.join(root, name)
-            )
+            list_component_safetensors_files(component)
+            # Some components keep their weights one folder down.
+            or sorted(glob.glob(os.path.join(component, "*", "*.safetensors")))
         )
     return files
 

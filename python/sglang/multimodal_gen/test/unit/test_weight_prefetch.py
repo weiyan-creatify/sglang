@@ -82,6 +82,7 @@ def test_plan_follows_the_pipeline_index_and_local_overrides(tmp_path):
         model_path=str(tmp_path),
         revision=None,
         model_subfolder=None,
+        model_variant=None,
         component_paths={"vae": "owner/repo/vae"},
         component_weights_paths={"text_encoder": str(override)},
         transformer_weights_path=None,
@@ -91,3 +92,34 @@ def test_plan_follows_the_pipeline_index_and_local_overrides(tmp_path):
         str(tmp_path / "transformer" / "model.safetensors"),
         str(override),
     ]
+
+
+def test_plan_reads_a_partition_only_when_the_arguments_name_it(tmp_path):
+    """A repository of partitions holds the same model several times; the
+    pipeline class picks one, so a guess would read weights nobody loads."""
+    index = '{"_class_name": "Pipeline", "transformer": ["diffusers", "DiT"]}'
+    (tmp_path / "model_index.json").write_text(index)
+    for partition in ("FL2VA", "Ref2VA"):
+        weights = tmp_path / partition / "transformer" / "source"
+        weights.mkdir(parents=True)
+        (weights / "model.safetensors").write_bytes(b"x")
+        (tmp_path / partition / "model_index.json").write_text(index)
+
+    def plan(**selection):
+        server_args = SimpleNamespace(
+            model_path=str(tmp_path),
+            revision=None,
+            model_subfolder=None,
+            model_variant=None,
+            component_paths={},
+            component_weights_paths={},
+            transformer_weights_path=None,
+        )
+        vars(server_args).update(selection)
+        return launch_server._pipeline_weight_files(server_args)
+
+    nested = str(tmp_path / "FL2VA" / "transformer" / "source" / "model.safetensors")
+    assert plan(model_variant="fl2va") == [nested]
+    assert plan(model_subfolder="FL2VA") == [nested]
+    assert plan() == []
+    assert plan(model_variant="hybrid") == []
