@@ -5,6 +5,9 @@ from sglang.multimodal_gen import envs
 from sglang.multimodal_gen.runtime.loader.weight_readers.base import (
     WeightReader,
 )
+from sglang.multimodal_gen.runtime.loader.weight_readers.pinned_parallel import (
+    PinnedParallelReader,
+)
 from sglang.multimodal_gen.runtime.loader.weight_readers.runai_streamer import (
     RunaiStreamerReader,
 )
@@ -16,7 +19,11 @@ from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 logger = init_logger(__name__)
 
 # The fallback is last and always available, so selection cannot come up empty.
-_READERS: tuple[type, ...] = (RunaiStreamerReader, SafetensorsMmapReader)
+_READERS: tuple[type, ...] = (
+    RunaiStreamerReader,
+    PinnedParallelReader,
+    SafetensorsMmapReader,
+)
 FALLBACK_READER = SafetensorsMmapReader
 
 
@@ -28,13 +35,16 @@ def select_weight_reader(
     *,
     requested: str | None = None,
     needs_key_filter: bool = False,
+    device_bound: bool = False,
 ) -> WeightReader:
     """Pick a reader, honouring an explicit request where it can be honoured.
 
     `requested` names a reader; None means take the environment's preference.
     A reader that cannot skip keys is passed over when the caller needs to,
     because reading the whole checkpoint to discard most of it is worse than
-    reading the part that was asked for more slowly.
+    reading the part that was asked for more slowly. A device-bound load that
+    would end up mapping the checkpoint reads through pinned buffers instead:
+    the mapping hands the device one pageable tensor at a time.
     """
     if requested is not None:
         chosen = next((b for b in _READERS if b.name == requested), None)
@@ -62,11 +72,19 @@ def select_weight_reader(
             FALLBACK_READER.name,
         )
         chosen = FALLBACK_READER
+    if (
+        device_bound
+        and chosen is FALLBACK_READER
+        and requested != FALLBACK_READER.name
+        and PinnedParallelReader.is_available()
+    ):
+        chosen = PinnedParallelReader
     return chosen()
 
 
 __all__ = [
     "FALLBACK_READER",
+    "PinnedParallelReader",
     "RunaiStreamerReader",
     "SafetensorsMmapReader",
     "WeightReader",
