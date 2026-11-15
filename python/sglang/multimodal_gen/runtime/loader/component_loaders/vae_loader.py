@@ -488,6 +488,14 @@ def _assign_direct_gpu_vae_state(
                 module._buffers[local_name] = tensor
             loaded_names.add(name)
 
+    # Buffers computed at construction are absent from checkpoints, so no slot
+    # moved them; one still on meta is left for finalize_loaded_model to report.
+    for module in vae.modules():
+        for local_name in module._non_persistent_buffers_set:
+            buffer = module._buffers[local_name]
+            if buffer is not None and not buffer.is_meta:
+                module._buffers[local_name] = buffer.to(device)
+
     consumed_metadata = _consume_vae_checkpoint_arch_metadata(
         metadata, vae_config, target_state
     )
@@ -711,11 +719,14 @@ class VAELoader(WeightOverrideComponentLoader):
         stream_checkpoint = (
             direct_gpu_weight_loading or configure_checkpoint is not None
         )
+        # Only a configurator needs meta: it reshapes modules before any weight
+        # exists. A plain direct load constructs on the host, where buffers
+        # computed at construction (rotary inv_freq) get their values.
         vae = initialize_model(
             vae_cls,
             {"config": vae_config},
             vae_dtype,
-            torch.device("meta") if stream_checkpoint else None,
+            torch.device("meta") if configure_checkpoint is not None else None,
         )
         if configure_checkpoint is not None:
             configure_checkpoint(vae)
