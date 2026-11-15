@@ -77,6 +77,17 @@ def _is_diffusers_model_dir(model_dir: str) -> bool:
     return False
 
 
+def _is_cached_diffusers_repo(repo_id: str) -> bool:
+    """Whether the local hub cache holds a Diffusers pipeline index for the repo."""
+    from huggingface_hub import try_to_load_from_cache  # lazy, as below
+
+    try:
+        cached = try_to_load_from_cache(repo_id, "model_index.json")
+    except ValueError:  # a file path, not a repository id
+        return False
+    return isinstance(cached, str) and _is_diffusers_model_dir(os.path.dirname(cached))
+
+
 def _is_gated_diffusion_repo(repo_id: str) -> bool:
     """Query HF model card metadata to check if a gated repo is a diffusers model."""
     try:
@@ -91,8 +102,8 @@ def _is_gated_diffusion_repo(repo_id: str) -> bool:
 def get_is_diffusion_model(model_path: str) -> bool:
     """Detect whether model_path points to a diffusion model.
 
-    For registered models, consults the diffusion registry first.
-    For other local directories, checks the filesystem directly.
+    A Diffusers index in a local directory or in the hub cache decides at once.
+    Otherwise the diffusion registry is consulted for registered models.
     For other HF/ModelScope model IDs, attempts to fetch only model_index.json.
     For gated HF repos where file download fails, falls back to HF model card
     metadata (library_name == "diffusers").
@@ -103,15 +114,22 @@ def get_is_diffusion_model(model_path: str) -> bool:
         # short-circuit, if applicable for the overlay mechanism (diffusion-only)
         return True
 
+    is_local_dir = os.path.isdir(model_path)
+    use_modelscope = envs.SGLANG_USE_MODELSCOPE.get()
+    # An index already on disk settles it without the registry, whose import
+    # takes seconds that the diffusion workers could spend starting.
+    if is_local_dir and _is_diffusers_model_dir(model_path):
+        return True
+    if not (is_local_dir or use_modelscope) and _is_cached_diffusers_repo(model_path):
+        return True
+
     # the diffusion registry is authoritative for native models, including
     # local directories without a top-level model_index.json
     if _is_diffusion_model_from_registry(model_path):
         return True
 
-    if os.path.isdir(model_path):
-        return _is_diffusers_model_dir(model_path)
-
-    use_modelscope = envs.SGLANG_USE_MODELSCOPE.get()
+    if is_local_dir:
+        return False
 
     try:
         if use_modelscope:

@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import json
+import os
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -41,6 +44,25 @@ class TestDiffusionModelDetection(CustomTestCase):
         )
         modelscope_patcher.start()
         self.addCleanup(modelscope_patcher.stop)
+
+    def test_an_index_on_disk_decides_without_the_registry(self):
+        """Importing the registry takes seconds, during which `sglang serve`
+        cannot start the diffusion workers."""
+        registry = patch(
+            "sglang.cli.utils._is_diffusion_model_from_registry",
+            side_effect=AssertionError("registry consulted"),
+        )
+        with tempfile.TemporaryDirectory() as model_dir, registry:
+            index_path = os.path.join(model_dir, "model_index.json")
+            with open(index_path, "w") as f:
+                json.dump({"_diffusers_version": "0.32.2"}, f)
+
+            with patch("sglang.cli.utils.os.path.isdir", return_value=True):
+                self.assertTrue(get_is_diffusion_model(model_dir))
+            with patch(
+                "huggingface_hub.try_to_load_from_cache", return_value=index_path
+            ):
+                self.assertTrue(get_is_diffusion_model("test/cached-diffusion-model"))
 
     @patch("huggingface_hub.HfApi")
     @patch("huggingface_hub.hf_hub_download")
