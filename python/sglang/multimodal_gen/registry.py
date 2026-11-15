@@ -7,10 +7,14 @@ and sampling parameters. It allows for easy registration and retrieval of model
 information based on model paths or other identifiers.
 """
 
+from __future__ import annotations
+
 import dataclasses
 import importlib
+import importlib.util
 import os
 import pkgutil
+import re
 from functools import lru_cache
 from typing import (
     TYPE_CHECKING,
@@ -25,8 +29,14 @@ from typing import (
 )
 
 if TYPE_CHECKING:
+    # Importing the base pipeline imports every loader; registry users that only
+    # resolve configs (the launcher) must not pay for it.
+    from sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base import (
+        ComposedPipelineBase,
+    )
     from sglang.multimodal_gen.runtime.server_args import Backend
 
+from sglang.multimodal_gen import envs
 from sglang.multimodal_gen.configs.pipeline_configs.base import PipelineConfig
 from sglang.multimodal_gen.configs.pipeline_configs.flux3_action import (
     FLUX3_ACTION_HF_PATHS,
@@ -45,9 +55,6 @@ from sglang.multimodal_gen.configs.sensenova_u1 import (
     SENSENOVA_U1_MODEL_IDS,
     is_sensenova_u1_adapter_only_model,
     is_sensenova_u1_model,
-)
-from sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base import (
-    ComposedPipelineBase,
 )
 from sglang.multimodal_gen.runtime.utils.external_model_package import (
     load_external_model_package,
@@ -69,6 +76,70 @@ _BUILTIN_PIPELINES_DISCOVERED = False
 # Registry for pipeline configuration classes (for safetensors files without model_index.json)
 # Maps pipeline_class_name -> (PipelineConfig class, SamplingParams class)
 _PIPELINE_CONFIG_REGISTRY: Dict[str, Tuple[Type[PipelineConfig], Type[Any]]] = {}
+# Entries register_configs declares up front; each must name the classes its
+# pipeline declares, so they can be returned without importing the pipeline.
+_STATIC_PIPELINE_CONFIG_ENTRIES: Dict[str, Tuple[Type[PipelineConfig], Type[Any]]] = {}
+
+
+_BUILTIN_PIPELINES_PACKAGE = "sglang.multimodal_gen.runtime.pipelines"
+
+
+def _register_entry_classes(pipeline_module) -> None:
+    if not hasattr(pipeline_module, "EntryClass"):
+        return
+    from sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base import (
+        ComposedPipelineBase,
+    )
+
+    entry_cls = pipeline_module.EntryClass
+    entry_cls_list = [entry_cls] if not isinstance(entry_cls, list) else entry_cls
+
+    for cls in entry_cls_list:
+        if not issubclass(cls, ComposedPipelineBase):
+            continue
+        registered = _PIPELINE_REGISTRY.get(cls.pipeline_name)
+        if registered is not None and registered is not cls:
+            logger.warning(
+                f"Duplicate pipeline name '{cls.pipeline_name}' found. Overwriting."
+            )
+        _PIPELINE_REGISTRY[cls.pipeline_name] = cls
+
+        # Special handling for ComfyUI Pipelines:
+        # Auto-register config classes if Pipeline class has them defined
+        # since comfyui get model from a single weight file, so we need to register the config classes here
+        if hasattr(cls, "pipeline_config_cls") and hasattr(cls, "sampling_params_cls"):
+            _PIPELINE_CONFIG_REGISTRY[cls.pipeline_name] = (
+                cls.pipeline_config_cls,
+                cls.sampling_params_cls,
+            )
+
+
+def _import_pipeline_module(module_name: str):
+    try:
+        return importlib.import_module(module_name)
+    except Exception as exc:
+        logger.warning(
+            "Skipping pipeline module %s during discovery due to import failure: %s",
+            module_name,
+            exc,
+        )
+        logger.debug(
+            "Pipeline import failure details for %s",
+            module_name,
+            exc_info=True,
+        )
+        return None
+
+
+def _builtin_pipeline_modules() -> list[str]:
+    package = importlib.import_module(_BUILTIN_PIPELINES_PACKAGE)
+    return [
+        module_name
+        for _, module_name, ispkg in pkgutil.walk_packages(
+            package.__path__, package.__name__ + "."
+        )
+        if not ispkg
+    ]
 
 
 def _discover_and_register_pipelines():
@@ -83,59 +154,81 @@ def _discover_and_register_pipelines():
         return
 
     with defer_full_gc_for_imports():
-        package_name = "sglang.multimodal_gen.runtime.pipelines"
-        package = importlib.import_module(package_name)
+        module_names = _builtin_pipeline_modules()
         _BUILTIN_PIPELINES_DISCOVERED = True
-
-        for _, module_name, ispkg in pkgutil.walk_packages(
-            package.__path__, package.__name__ + "."
-        ):
-            if not ispkg:
-                try:
-                    pipeline_module = importlib.import_module(module_name)
-                except Exception as exc:
-                    logger.warning(
-                        "Skipping pipeline module %s during discovery due to import failure: %s",
-                        module_name,
-                        exc,
-                    )
-                    logger.debug(
-                        "Pipeline import failure details for %s",
-                        module_name,
-                        exc_info=True,
-                    )
-                    continue
-                if hasattr(pipeline_module, "EntryClass"):
-                    entry_cls = pipeline_module.EntryClass
-                    entry_cls_list = (
-                        [entry_cls] if not isinstance(entry_cls, list) else entry_cls
-                    )
-
-                    for cls in entry_cls_list:
-                        if not issubclass(cls, ComposedPipelineBase):
-                            continue
-                        if cls.pipeline_name in _PIPELINE_REGISTRY:
-                            logger.warning(
-                                f"Duplicate pipeline name '{cls.pipeline_name}' found. Overwriting."
-                            )
-                        _PIPELINE_REGISTRY[cls.pipeline_name] = cls
-
-                        # Special handling for ComfyUI Pipelines:
-                        # Auto-register config classes if Pipeline class has them defined
-                        # since comfyui get model from a single weight file, so we need to register the config classes here
-                        if hasattr(cls, "pipeline_config_cls") and hasattr(
-                            cls, "sampling_params_cls"
-                        ):
-                            _PIPELINE_CONFIG_REGISTRY[cls.pipeline_name] = (
-                                cls.pipeline_config_cls,
-                                cls.sampling_params_cls,
-                            )
+        for module_name in module_names:
+            pipeline_module = _import_pipeline_module(module_name)
+            if pipeline_module is not None:
+                _register_entry_classes(pipeline_module)
     logger.debug(
         f"Registering pipelines complete, {len(_PIPELINE_REGISTRY)} pipelines registered"
     )
 
 
+@lru_cache(maxsize=None)
+def _builtin_module_declaring(pipeline_class_name: str) -> str | None:
+    """The builtin pipeline module whose source names this pipeline, if any."""
+    declaration = re.compile(
+        r"""\bpipeline_name\s*(?::\s*\w+\s*)?=\s*["']"""
+        + re.escape(pipeline_class_name)
+        + r"""["']"""
+    )
+    for module_name in _builtin_pipeline_modules():
+        spec = importlib.util.find_spec(module_name)
+        if spec is None or spec.origin is None or not spec.origin.endswith(".py"):
+            continue
+        with open(spec.origin, encoding="utf-8") as f:
+            if declaration.search(f.read()):
+                return module_name
+    return None
+
+
+def _ensure_pipeline_registered(pipeline_class_name: str) -> None:
+    """Register one named pipeline without importing every builtin pipeline.
+
+    Every pipeline module imports its models and stages, so full discovery
+    costs seconds at startup; a server needs only the pipeline it serves.
+    Falls back to full discovery when no builtin module declares the name.
+    """
+    if envs.SGLANG_EXTERNAL_MODEL_PACKAGE:
+        # Out-of-tree packages override builtins; keep their exact ordering.
+        _ensure_registry_initialized()
+        return
+    if (
+        not _BUILTIN_PIPELINES_DISCOVERED
+        and pipeline_class_name not in _PIPELINE_REGISTRY
+    ):
+        module_name = _builtin_module_declaring(pipeline_class_name)
+        if module_name is not None:
+            with defer_full_gc_for_imports():
+                pipeline_module = _import_pipeline_module(module_name)
+            if pipeline_module is not None:
+                _register_entry_classes(pipeline_module)
+    if pipeline_class_name not in _PIPELINE_REGISTRY:
+        _discover_and_register_pipelines()
+    # Out-of-tree packages load after builtins so they keep overriding them.
+    load_external_model_package()
+
+
+def _is_pipeline_available(pipeline_class_name: str) -> bool:
+    """Whether a pipeline is registered or declared by a builtin module, without
+    importing a module that only declares it."""
+    if envs.SGLANG_EXTERNAL_MODEL_PACKAGE:
+        _ensure_registry_initialized()
+    if pipeline_class_name in _PIPELINE_REGISTRY:
+        return True
+    if (
+        not _BUILTIN_PIPELINES_DISCOVERED
+        and not envs.SGLANG_EXTERNAL_MODEL_PACKAGE
+        and _builtin_module_declaring(pipeline_class_name) is not None
+    ):
+        return True
+    _ensure_registry_initialized()
+    return pipeline_class_name in _PIPELINE_REGISTRY
+
+
 def _ensure_registry_initialized() -> None:
+    _discover_and_register_configs()
     _discover_and_register_pipelines()
     load_external_model_package()
 
@@ -146,8 +239,15 @@ def get_pipeline_config_classes(
     """
     Get the configuration classes for a pipeline.
     """
-    # Ensure pipelines are discovered first
-    _ensure_registry_initialized()
+    if not envs.SGLANG_EXTERNAL_MODEL_PACKAGE:
+        # Config modules declare static entries; importing them is far cheaper
+        # than importing the pipeline, which imports its whole model stack.
+        _discover_and_register_configs()
+        if pipeline_class_name in _STATIC_PIPELINE_CONFIG_ENTRIES:
+            return _STATIC_PIPELINE_CONFIG_ENTRIES[pipeline_class_name]
+    _ensure_pipeline_registered(pipeline_class_name)
+    if pipeline_class_name not in _PIPELINE_CONFIG_REGISTRY:
+        _discover_and_register_configs()
     return _PIPELINE_CONFIG_REGISTRY.get(pipeline_class_name)
 
 
@@ -155,7 +255,7 @@ def get_pipeline_class(
     pipeline_class_name: str,
 ) -> Type[ComposedPipelineBase] | None:
     """Get a registered pipeline class by name."""
-    _ensure_registry_initialized()
+    _ensure_pipeline_registered(pipeline_class_name)
     return _PIPELINE_REGISTRY.get(pipeline_class_name)
 
 
@@ -227,6 +327,8 @@ def register_configs(
     """
     Registers configuration classes for a new model family.
     """
+    # Built-in configs register first, so a later registration overrides them.
+    _discover_and_register_configs()
     model_id = str(len(_CONFIG_REGISTRY))
 
     _CONFIG_REGISTRY[model_id] = ConfigInfo(
@@ -248,6 +350,7 @@ def register_configs(
     if pipeline_config_registry_entries:
         for pipeline_name, (pc_cls, sp_cls) in pipeline_config_registry_entries.items():
             _PIPELINE_CONFIG_REGISTRY.setdefault(pipeline_name, (pc_cls, sp_cls))
+            _STATIC_PIPELINE_CONFIG_ENTRIES[pipeline_name] = (pc_cls, sp_cls)
 
     return model_id
 
@@ -262,7 +365,13 @@ def register_pipeline(
     overwrite: bool = False,
 ) -> None:
     """Register an out-of-tree native diffusion pipeline and its configs."""
+    # Built-in configs register first, so a later registration overrides them.
+    _discover_and_register_configs()
     _discover_and_register_pipelines()
+    from sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base import (
+        ComposedPipelineBase,
+    )
+
     if not issubclass(pipeline_cls, ComposedPipelineBase):
         raise TypeError("pipeline_cls must inherit from ComposedPipelineBase")
     if not issubclass(pipeline_config_cls, PipelineConfig):
@@ -391,6 +500,7 @@ def _in_hf_cache_repo(normalized_path: str, repo_id: str) -> bool:
 def _match_registered_hf_path(model_path: str) -> Optional[str]:
     """The registered HF id ``model_path`` names: exactly, by short name, or as
     a local HuggingFace cache path."""
+    _discover_and_register_configs()
     all_model_hf_paths = sorted(_MODEL_HF_PATH_TO_NAME.keys(), key=len, reverse=True)
 
     # 1. Exact match
@@ -434,11 +544,17 @@ def _match_registered_hf_path(model_path: str) -> Optional[str]:
 
 
 def has_registered_diffusion_model_path(model_path: str) -> bool:
+    def registered() -> bool:
+        return (
+            is_sensenova_u1_model(model_path)
+            or _match_registered_hf_path(model_path) is not None
+        )
+
+    # As in _get_config_info: a match before discovery is a match after it.
+    if not envs.SGLANG_EXTERNAL_MODEL_PACKAGE and registered():
+        return True
     _ensure_registry_initialized()
-    return (
-        is_sensenova_u1_model(model_path)
-        or _match_registered_hf_path(model_path) is not None
-    )
+    return registered()
 
 
 @lru_cache(maxsize=1)
@@ -448,7 +564,20 @@ def _get_config_info(
     """
     Gets the ConfigInfo for a given model path using mappings and detectors.
     """
+    # Configs registered at import precede those pipeline modules register, so an
+    # id or path match among them is the match full discovery would return.
+    if not envs.SGLANG_EXTERNAL_MODEL_PACKAGE:
+        config_info = _match_config_info(model_path, model_id, final=False)
+        if config_info is not None:
+            return config_info
     _ensure_registry_initialized()
+    return _match_config_info(model_path, model_id, final=True)
+
+
+def _match_config_info(
+    model_path: str, model_id: Optional[str], *, final: bool
+) -> Optional[ConfigInfo]:
+    _discover_and_register_configs()
     all_model_hf_paths = sorted(_MODEL_HF_PATH_TO_NAME.keys(), key=len, reverse=True)
 
     # 0. Explicit model_id override: match by short name
@@ -460,10 +589,11 @@ def _get_config_info(
                     f"Resolved model via explicit --model-id '{model_id}' → '{registered_hf_id}'."
                 )
                 return _CONFIG_REGISTRY.get(_MODEL_HF_PATH_TO_NAME[registered_hf_id])
-        logger.warning(
-            f"--model-id '{model_id}' did not match any registered model; "
-            "falling back to automatic detection."
-        )
+        if final:
+            logger.warning(
+                f"--model-id '{model_id}' did not match any registered model; "
+                "falling back to automatic detection."
+            )
 
     # SenseNova Hub IDs require an exact match, while local checkpoints are
     # identified from their config metadata rather than their directory name.
@@ -485,7 +615,9 @@ def _get_config_info(
     if registered_hf_id is not None:
         return _CONFIG_REGISTRY.get(_MODEL_HF_PATH_TO_NAME[registered_hf_id])
 
-    # 3. Use detectors
+    # 3. Use detectors; they see every registered config only after discovery.
+    if not final:
+        return None
     pipeline_name = get_non_diffusers_pipeline_name(model_path)
     if pipeline_name is None:
         config = maybe_download_model_index(model_path)
@@ -519,12 +651,11 @@ def _get_config_info(
             )
         model_id = matched_model_names[0]
         return _CONFIG_REGISTRY.get(model_id)
-    else:
-        logger.debug(
-            f"No model info found for model path: {model_path}. "
-            f"Please check the model path or specify the model_id explicitly."
-        )
-        return None
+    logger.debug(
+        f"No model info found for model path: {model_path}. "
+        f"Please check the model path or specify the model_id explicitly."
+    )
+    return None
 
 
 # --- Part 3: Main Resolver ---
@@ -537,9 +668,23 @@ class ModelInfo:
     diffusers model within this framework.
     """
 
-    pipeline_cls: Type[ComposedPipelineBase]
     sampling_param_cls: Any
     pipeline_config_cls: Type[PipelineConfig]
+    # The class, or its registered name: importing a pipeline imports its
+    # models, which resolving server arguments does not need.
+    pipeline: Type[ComposedPipelineBase] | str
+
+    @property
+    def pipeline_cls(self) -> Type[ComposedPipelineBase]:
+        if isinstance(self.pipeline, str):
+            pipeline_cls = get_pipeline_class(self.pipeline)
+            if pipeline_cls is None:
+                raise ValueError(
+                    f"Pipeline class {self.pipeline!r} is declared but failed to "
+                    "import; see the earlier discovery warning."
+                )
+            self.pipeline = pipeline_cls
+        return self.pipeline
 
 
 def _get_diffusers_model_info(
@@ -586,7 +731,7 @@ def _get_diffusers_model_info(
                 )
 
     return ModelInfo(
-        pipeline_cls=DiffusersPipeline,
+        pipeline=DiffusersPipeline,
         sampling_param_cls=sampling_param_cls,
         pipeline_config_cls=pipeline_config_cls,
     )
@@ -595,7 +740,7 @@ def _get_diffusers_model_info(
 @lru_cache(maxsize=1)
 def get_model_info(
     model_path: str,
-    backend: Optional[Union[str, "Backend"]] = None,
+    backend: Optional[Union[str, Backend]] = None,
     model_id: Optional[str] = None,
 ) -> Optional[ModelInfo]:
     """
@@ -638,9 +783,6 @@ def get_model_info(
         return _get_diffusers_model_info(model_path=model_path, model_id=model_id)
 
     # For AUTO or SGLANG backend, try native implementation first
-    # 1. Discover all available pipeline classes and cache them
-    _ensure_registry_initialized()
-
     # Detect quantized models and fallback to diffusers
     is_quantized = any(q in model_path.lower() for q in ["-4bit", "-awq", "-gptq"])
     if is_quantized and backend != Backend.DIFFUSERS:
@@ -684,8 +826,7 @@ def get_model_info(
                 )
             return None
 
-    pipeline_cls = _PIPELINE_REGISTRY.get(pipeline_class_name)
-    if not pipeline_cls:
+    if not _is_pipeline_available(pipeline_class_name):
         if backend == Backend.AUTO:
             logger.warning(
                 f"Pipeline class '{pipeline_class_name}' specified in '{model_path}' has no native sglang support. "
@@ -721,16 +862,13 @@ def get_model_info(
     # 4. Combine and return the complete model info
     logger.debug("Using native sglang backend for model '%s'", model_path)
     model_info = ModelInfo(
-        pipeline_cls=pipeline_cls,
+        pipeline=_PIPELINE_REGISTRY.get(pipeline_class_name, pipeline_class_name),
         sampling_param_cls=config_info.sampling_param_cls,
         pipeline_config_cls=config_info.pipeline_config_cls,
     )
     logger.debug(f"Found model info: {model_info}")
 
     return model_info
-
-
-_discover_and_register_configs()
 
 
 def get_non_diffusers_pipeline_name(model_path: str) -> Optional[str]:
@@ -764,3 +902,6 @@ def is_registered_diffusion_model_path(model_path: str) -> bool:
     return has_registered_diffusion_model_path(model_path) or (
         get_non_diffusers_pipeline_name(model_path) is not None
     )
+
+
+_discover_and_register_configs()

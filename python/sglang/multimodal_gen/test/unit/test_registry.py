@@ -146,3 +146,17 @@ def test_model_discovery_preserves_nested_declarations(tmp_path, monkeypatch, en
     discovered = model_registry._discover_and_register_models.__wrapped__()
     assert discovered == {"Model": ("dits", "example", "Model")}
     assert aliases == {"external.Model": "Model"}
+
+
+def test_static_pipeline_config_entries_match_their_pipelines():
+    """A static entry stands in for importing its pipeline at startup, so it must
+    name the config classes that pipeline declares."""
+    registry._ensure_registry_initialized()
+    assert "MiniMaxH3Pipeline" in registry._STATIC_PIPELINE_CONFIG_ENTRIES
+    for name, (
+        config_cls,
+        sampling_cls,
+    ) in registry._STATIC_PIPELINE_CONFIG_ENTRIES.items():
+        pipeline_cls = registry._PIPELINE_REGISTRY[name]
+        assert pipeline_cls.pipeline_config_cls is config_cls, name
+        assert pipeline_cls.sampling_params_cls is sampling_cls, name
