@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib
+import importlib.metadata
 import json
 import multiprocessing as mp
 import os
@@ -14,6 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from sglang.multimodal_gen.runtime.managers import worker_bootstrap
+from sglang.multimodal_gen.runtime.utils import package_metadata
 
 WORKER_MODULE = "sglang.multimodal_gen.runtime.managers.gpu_worker"
 GENERATOR_MODULE = "sglang.multimodal_gen.runtime.entrypoints.diffusion_generator"
@@ -103,6 +105,18 @@ def _check_http_server_import_order(pipe_writer) -> None:
 
     pipe_writer.send(observed)
     pipe_writer.close()
+
+
+class TestPackageMetadataCache(unittest.TestCase):
+    def test_packages_distributions_matches_the_standard_library(self):
+        # transformers and diffusers decide which optional packages exist from it.
+        def normalized(mapping):
+            return {name: sorted(dists) for name, dists in mapping.items()}
+
+        self.assertEqual(
+            normalized(package_metadata._packages_distributions()),
+            normalized(importlib.metadata.packages_distributions()),
+        )
 
 
 class TestBootstrapImportBoundary(unittest.TestCase):
