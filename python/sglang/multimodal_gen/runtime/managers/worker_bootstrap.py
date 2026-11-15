@@ -121,6 +121,7 @@ def bootstrap_scheduler_process(spec: SchedulerProcessSpec) -> None:
 
     kill_itself_when_parent_died()
     use_thread_lock_for_tqdm()
+    _cache_package_metadata()
 
     # Every rank re-executes the same script, so one rank reporting is enough.
     if spec.rank == 0:
@@ -154,6 +155,15 @@ def bootstrap_scheduler_process(spec: SchedulerProcessSpec) -> None:
         server_args=server_args,
         pipe_writer=spec.pipe_writer,
     )
+
+
+def _cache_package_metadata() -> None:
+    # Before anything imports transformers or diffusers, which probe it.
+    from sglang.multimodal_gen.runtime.utils.package_metadata import (
+        cache_package_metadata,
+    )
+
+    cache_package_metadata()
 
 
 def bootstrap_http_server_process(

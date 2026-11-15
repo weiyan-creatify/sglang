@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib
+import importlib.metadata
 import io
 import json
 import multiprocessing as mp
@@ -15,6 +16,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from sglang.multimodal_gen.runtime.managers import worker_bootstrap
+from sglang.multimodal_gen.runtime.utils import package_metadata
 
 WORKER_MODULE = "sglang.multimodal_gen.runtime.managers.gpu_worker"
 GENERATOR_MODULE = "sglang.multimodal_gen.runtime.entrypoints.diffusion_generator"
@@ -143,6 +145,18 @@ class TestTqdmThreadLock(unittest.TestCase):
             "tqdm no longer creates its multiprocessing lock; drop the workaround",
         )
         self.assertFalse(self._mp_lock_created(apply_fix=True))
+
+
+class TestPackageMetadataCache(unittest.TestCase):
+    def test_packages_distributions_matches_the_standard_library(self):
+        # transformers and diffusers decide which optional packages exist from it.
+        def normalized(mapping):
+            return {name: sorted(dists) for name, dists in mapping.items()}
+
+        self.assertEqual(
+            normalized(package_metadata._packages_distributions()),
+            normalized(importlib.metadata.packages_distributions()),
+        )
 
 
 class TestBootstrapImportBoundary(unittest.TestCase):
