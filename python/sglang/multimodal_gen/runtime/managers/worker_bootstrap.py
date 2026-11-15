@@ -19,6 +19,7 @@ Keep module scope limited to the standard library and import-neutral types.
 
 from __future__ import annotations
 
+import gc
 import logging
 import pickle
 import sys
@@ -109,6 +110,12 @@ class SchedulerProcessSpec:
     pipe_writer: Connection
 
 
+def _freeze_imported_heap() -> None:
+    # What the imports created lives as long as the process. Left tracked, every
+    # later full collection traces it again: 0.6 s each in a MiniMax-H3 worker.
+    gc.freeze()
+
+
 def bootstrap_scheduler_process(spec: SchedulerProcessSpec) -> None:
     """Initialize a child in dependency order, then invoke its worker."""
     # Arm PDEATHSIG before any vendor code runs: everything below can block,
@@ -145,6 +152,8 @@ def bootstrap_scheduler_process(spec: SchedulerProcessSpec) -> None:
         # Resolve the function from its module after hook application. A ``from``
         # binding created earlier would retain the unpatched callable.
         from sglang.multimodal_gen.runtime.managers import gpu_worker
+
+        _freeze_imported_heap()
 
     gpu_worker.run_scheduler_process(
         local_rank=spec.local_rank,
