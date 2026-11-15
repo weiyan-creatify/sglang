@@ -368,6 +368,22 @@ def test_build_directory_entries_are_dropped(tmp_path):
     assert [entry.relpath for entry in entries] == [str(outside)]
 
 
+def test_build_directory_behind_a_symlink_is_still_dropped(tmp_path):
+    """A cache root reached through a symlink still drops its own staging files.
+
+    Recording the staging unit makes the leaf unverifiable once staging is gone,
+    so every new process rebuilds the module.
+    """
+    real_root = tmp_path / "volume"
+    (real_root / "build").mkdir(parents=True)
+    (tmp_path / "cache").symlink_to(real_root)
+    build_dir = tmp_path / "cache" / "build"
+    generated = _write(build_dir / "cuda.cu", "// generated")
+    outside = _write(tmp_path / "real.h", "// real")
+    entries = cache._to_entries(dependencies=[generated, outside], build_dir=build_dir)
+    assert [entry.relpath for entry in entries] == [str(outside.resolve())]
+
+
 def test_publish_loses_the_race_gracefully(tmp_path):
     """Two processes building identical content: the loser adopts the winner's leaf."""
     winner = tmp_path / "leaf"
