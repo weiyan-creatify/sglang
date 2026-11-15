@@ -103,7 +103,8 @@ def _safetensors_files_from_index(component_model_path: str) -> list[str]:
     return sorted(indexed_files)
 
 
-def _list_component_safetensors_files(component_model_path: str) -> list[str]:
+def list_component_safetensors_files(component_model_path: str) -> list[str]:
+    """Safetensors files of a component: its indexed shards, else every file."""
     if os.path.isfile(component_model_path):
         if component_model_path.endswith(".safetensors"):
             return [component_model_path]
@@ -119,7 +120,7 @@ def _list_component_safetensors_files(component_model_path: str) -> list[str]:
 
 def infer_component_weight_size_bytes(component_model_path: str) -> int | None:
     """Infer checkpoint payload size from safetensors without materializing tensors."""
-    safetensors_files = _list_component_safetensors_files(component_model_path)
+    safetensors_files = list_component_safetensors_files(component_model_path)
     if safetensors_files:
         sizes = [
             size
