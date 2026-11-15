@@ -434,6 +434,45 @@ tensors) before a single weight is written. A sidecar is built offline and
 cannot be regenerated in the server, so weight updates are rejected outright;
 rebuild the sidecar against the new weights and restart.
 
+### Cold start on one B200
+
+A server that starts with each burst of traffic spends most of its start
+importing Python modules and reading 129 GB of weights. The flags below overlap
+those steps. With the checkpoint on a network volume, the first request reaches
+its first denoising step about 21 s after `sglang serve` starts, against 80 s
+for the same command without them. On hosts that import and read more slowly
+it is 37 s against 146 s.
+
+```bash 1×B200
+sglang serve \
+  --model-path MiniMaxAI/MiniMax-H3 \
+  --model-variant fl2va \
+  --num-gpus 1 \
+  --encoder-parallel auto \
+  --performance-mode speed \
+  --direct-gpu-weight-loading true \
+  --component-direct-gpu-weight-loading.text_encoder true \
+  --component-direct-gpu-weight-loading.video_vae true \
+  --weight-loader-prefetch-checkpoints true \
+  --weight-loader-prefetch-to-gpu true \
+  --port 30010
+```
+
+- `--weight-loader-prefetch-checkpoints` reads the checkpoint into the page
+  cache with helper processes from the moment the command line is parsed.
+- `--weight-loader-prefetch-to-gpu` uploads the text encoder, DiT and video VAE
+  weights while the worker is still importing. The three direct-GPU flags make
+  their loaders take the uploaded tensors.
+- Keep the checkpoint in the local hub cache, or pass a local directory.
+  `sglang serve` then recognizes the model from its `model_index.json` and
+  starts the worker at once.
+- Build the kernel caches into the image, as described in
+  [Cold Start](/docs/sglang-diffusion/deployment_cookbook#cold-start). Without
+  them the first request compiles kernels for about 15 s.
+
+Measured on 16 CPUs and 192 GiB of host memory with warmup off: FL2VA,
+768×768, 124 frames, medians over cold containers.
+
 ### Serve MiniMax-H3 on Ascend NPUs
 
 For Ascend NPU, follow the
