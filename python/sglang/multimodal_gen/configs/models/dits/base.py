@@ -1,11 +1,16 @@
 # Copied and adapted from: https://github.com/hao-ai-lab/FastVideo
 
 # SPDX-License-Identifier: Apache-2.0
+from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sglang.multimodal_gen.configs.models.base import ArchConfig, ModelConfig
-from sglang.multimodal_gen.runtime.layers.quantization import QuantizationConfig
+
+if TYPE_CHECKING:
+    # Runtime import pulls in every srt quantization backend; configs only annotate.
+    from sglang.multimodal_gen.runtime.layers.quantization import QuantizationConfig
 
 
 @dataclass

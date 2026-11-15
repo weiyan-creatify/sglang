@@ -6,7 +6,6 @@ import argparse
 import os
 from typing import cast
 
-from sglang.multimodal_gen.apps.webui import run_sgl_diffusion_webui
 from sglang.multimodal_gen.runtime.entrypoints.cli.cli_types import CLISubcommand
 from sglang.multimodal_gen.runtime.entrypoints.cli.utils import (
     add_resolved_pipeline_config_cli_args,
@@ -44,6 +43,9 @@ def execute_serve_cmd(args: argparse.Namespace, unknown_args: list[str] | None =
     dispatch_launch(server_args)
 
     if server_args.webui:
+        # The web UI imports most pipeline and model code; only load it on request.
+        from sglang.multimodal_gen.apps.webui import run_sgl_diffusion_webui
+
         run_sgl_diffusion_webui(server_args)
 
 

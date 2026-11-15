@@ -26,11 +26,8 @@ import tempfile
 import time
 from functools import reduce
 from pathlib import Path
-from typing import Any, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, Optional, Union, cast
 
-from diffusers.loaders.lora_base import (
-    _best_guess_weight_name,  # watch out for potetential removal from diffusers
-)
 from huggingface_hub.errors import (
     EntryNotFoundError,
     LocalEntryNotFoundError,
@@ -39,7 +36,6 @@ from huggingface_hub.errors import (
 )
 from requests.exceptions import ConnectionError as RequestsConnectionError
 from requests.exceptions import RequestException
-from transformers import AutoConfig, PretrainedConfig
 
 from sglang.multimodal_gen.runtime.loader.utils import _clean_hf_config_inplace
 from sglang.multimodal_gen.runtime.loader.weight_utils import get_lock
@@ -49,13 +45,15 @@ from sglang.multimodal_gen.runtime.utils.model_overlay import (
     maybe_load_overlay_model_index,
     maybe_resolve_overlay_model_path,
 )
-from sglang.multimodal_gen.runtime.utils.quantization_utils import (
-    normalize_flat_modelopt_quant_config,
-)
 from sglang.multimodal_gen.runtime.weights.source import resolve_weight
 from sglang.srt.environ import envs
-from sglang.srt.hf_transformers import check_gguf_file
 from sglang.utils import is_in_ci
+
+if TYPE_CHECKING:
+    from transformers import PretrainedConfig
+
+# diffusers, transformers and the quantization utilities import in seconds; the
+# launcher reads model indexes through this module, so they load where used.
 
 logger = init_logger(__name__)
 
@@ -406,7 +404,11 @@ def get_hf_config(
     revision: str | None = None,
     model_override_args: dict | None = None,
     **kwargs,
-) -> PretrainedConfig:
+) -> "PretrainedConfig":
+    from transformers import AutoConfig
+
+    from sglang.srt.hf_transformers import check_gguf_file
+
     if check_gguf_file(component_model_path):
         raise NotImplementedError("GGUF models are not supported.")
 
@@ -475,6 +477,10 @@ def prepare_diffusers_component_path_for_loading(component_path: str) -> str:
         except Exception as exc:
             logger.warning("Failed to read component config %s: %s", config_path, exc)
             return local_component_path
+
+        from sglang.multimodal_gen.runtime.utils.quantization_utils import (
+            normalize_flat_modelopt_quant_config,
+        )
 
         quant_config = config.get("quantization_config")
         normalized_quant_config = normalize_flat_modelopt_quant_config(quant_config)
@@ -567,6 +573,10 @@ def get_diffusers_component_config(
 
     quant_config = combined_config.get("quantization_config")
     if quant_config is not None:
+        from sglang.multimodal_gen.runtime.utils.quantization_utils import (
+            normalize_flat_modelopt_quant_config,
+        )
+
         combined_config["quantization_config"] = normalize_flat_modelopt_quant_config(
             quant_config
         )
@@ -619,6 +629,9 @@ def maybe_download_lora(
                     f"{local_path}"
                 )
             return target
+        # watch out for potential removal from diffusers
+        from diffusers.loaders.lora_base import _best_guess_weight_name
+
         guessed = _best_guess_weight_name(local_path, file_extension=".safetensors")
         if guessed is None and current_platform.is_rocm():
             guessed = _best_guess_weight_name(

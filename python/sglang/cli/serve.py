@@ -21,10 +21,6 @@ from sglang.cli.utils import (
     is_registered_native_pipeline,
     try_get_model_path,
 )
-from sglang.srt.utils import kill_process_tree
-from sglang.srt.utils.log_utils import suppress_noisy_warnings
-
-suppress_noisy_warnings()
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +97,8 @@ def _run_llm(request: ServeRequest) -> None:
         _print_llm_help(request)
         return
 
+    _suppress_noisy_warnings()
+
     from sglang.launch_server import run_server
     from sglang.srt.server_args import prepare_server_args
 
@@ -120,10 +118,19 @@ def _detect_diffusion(request: ServeRequest) -> ServeBackendDetection:
     return ServeBackendDetection.NO_MATCH
 
 
+def _suppress_noisy_warnings() -> None:
+    # srt.utils imports torch, so each backend calls this once it may load it.
+    from sglang.srt.utils.log_utils import suppress_noisy_warnings
+
+    suppress_noisy_warnings()
+
+
 def _run_diffusion(request: ServeRequest) -> None:
     if any(arg in request.argv for arg in ("-h", "--help")):
         _print_diffusion_help(request)
         return
+
+    _suppress_noisy_warnings()
 
     from sglang.multimodal_gen.runtime.platforms.plugins import apply_plugin_hooks
 
@@ -245,4 +252,6 @@ def serve(args, extra_argv):
 
         registered.backend.run(request)
     finally:
+        from sglang.srt.utils import kill_process_tree
+
         kill_process_tree(os.getpid(), include_parent=False)

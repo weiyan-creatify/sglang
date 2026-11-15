@@ -1,23 +1,19 @@
 # Copied and adapted from: https://github.com/hao-ai-lab/FastVideo
 
+import importlib
 import multiprocessing as mp
 import os
 import sys
+import threading
 import time
 from contextlib import ExitStack
 from multiprocessing.connection import wait
+from typing import TYPE_CHECKING
 
 import uvicorn
 
-from sglang.multimodal_gen.runtime.disaggregation.orchestrator import (
-    DiffusionServer,
-)
 from sglang.multimodal_gen.runtime.disaggregation.roles import RoleType
 from sglang.multimodal_gen.runtime.entrypoints.control_requests import ShutdownReq
-from sglang.multimodal_gen.runtime.entrypoints.http_server import create_app
-from sglang.multimodal_gen.runtime.entrypoints.openai.utils import (
-    resolve_sampling_params_cls,
-)
 from sglang.multimodal_gen.runtime.managers.worker_bootstrap import (
     SchedulerProcessSpec,
     ServerArgsPayload,
@@ -41,6 +37,11 @@ from sglang.multimodal_gen.runtime.utils.process import (
     kill_process_tree,
 )
 from sglang.multimodal_gen.runtime.utils.trace_wrapper import init_diffusion_tracing
+
+if TYPE_CHECKING:
+    from sglang.multimodal_gen.runtime.disaggregation.orchestrator import (
+        DiffusionServer,
+    )
 
 _SCHEDULER_SHUTDOWN_TIMEOUT_MS = 5000
 _WORKER_JOIN_TIMEOUT_S = 10
@@ -165,6 +166,12 @@ def _start_scheduler_processes(
                 writer.close()
                 pending[reader] = process
 
+            # The HTTP stack takes seconds to import; load it while the workers start.
+            threading.Thread(
+                target=importlib.import_module,
+                args=("sglang.multimodal_gen.runtime.entrypoints.http_server",),
+                daemon=True,
+            ).start()
             # watch every child, including ready ranks, while its peers initialize
             sentinels = {p.sentinel: p for p in processes}
             while pending:
@@ -303,6 +310,13 @@ def launch_pool_disagg_server(
             decoder_gpus=[[0], [2]],
         )
     """
+    from sglang.multimodal_gen.runtime.disaggregation.orchestrator import (
+        DiffusionServer,
+    )
+    from sglang.multimodal_gen.runtime.entrypoints.openai.utils import (
+        resolve_sampling_params_cls,
+    )
+
     configure_logger(server_args)
 
     num_encoders = len(encoder_gpus)
@@ -460,8 +474,12 @@ def launch_http_server_only(
     server_args,
     *,
     worker_pids: tuple[int, ...] = (),
-    disagg_server: DiffusionServer | None = None,
+    disagg_server: "DiffusionServer | None" = None,
 ):
+    # The HTTP stack imports most of the runtime; the launcher loads it after
+    # the workers have their spec.
+    from sglang.multimodal_gen.runtime.entrypoints.http_server import create_app
+
     init_diffusion_tracing(server_args, "DiffHTTPServer")
 
     # set for endpoints to access global_server_args
@@ -498,6 +516,13 @@ def launch_disagg_server(server_args: ServerArgs):
         denoiser result: scheduler_port + 2
         decoder result: scheduler_port + 3
     """
+    from sglang.multimodal_gen.runtime.disaggregation.orchestrator import (
+        DiffusionServer,
+    )
+    from sglang.multimodal_gen.runtime.entrypoints.openai.utils import (
+        resolve_sampling_params_cls,
+    )
+
     configure_logger(server_args)
     set_global_server_args(server_args)
 
