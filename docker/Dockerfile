@@ -698,6 +698,13 @@ RUN --mount=type=bind,from=mega_source,source=/src,target=/tmp/mega-src \
         && python3 -c "from importlib.metadata import entry_points; assert any(e.name == 'nvidia_megakernel' for e in entry_points(group='sglang.srt.plugins')), 'sgl-nvidia-mega plugin not registered'"; \
     fi
 
+# Ship bytecode in one final layer. The installs above strip __pycache__ to keep
+# their layers small, so the first Python process of every new container would
+# otherwise compile thousands of modules before it runs.
+# Some vendored files are not valid Python 3, so failures are expected.
+RUN /opt/sglang/bin/python -m compileall -q -j 0 \
+        /opt/sglang/lib/python3.12/site-packages /sgl-workspace/sglang/python > /dev/null || true
+
 # Set workspace directory
 WORKDIR /sgl-workspace/sglang
 
