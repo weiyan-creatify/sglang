@@ -10,7 +10,9 @@ device tensors on their own streams, which reaches about 45 GB/s from the page
 cache and keeps several storage requests in flight when it is not.
 
 Each selected tensor gets its own device allocation, so a caller that adopts a
-yielded tensor as a parameter keeps exactly that tensor alive.
+yielded tensor as a parameter keeps exactly that tensor alive. ``iter_files``
+can instead carve a file's tensors from one allocation, for a caller that
+shares them with another process and wants one handle per file.
 """
 
 from __future__ import annotations
@@ -36,6 +38,8 @@ _PINNED_SLOTS = 16
 # quarter of the free memory so small cards keep room for the parameters.
 _LOOKAHEAD_BYTES = 12 << 30
 _LOOKAHEAD_FREE_FRACTION = 0.25
+# Keeps every dtype on an element boundary inside a shared allocation.
+_SHARED_ALLOCATION_ALIGNMENT = 16
 
 
 class _TensorSpec(msgspec.Struct, frozen=True):
@@ -112,13 +116,40 @@ def _plan_pieces(specs: list[_TensorSpec]) -> list[_Piece]:
     return pieces
 
 
+def _views_of_one_allocation(
+    specs: list[_TensorSpec], device: torch.device
+) -> list[torch.Tensor]:
+    offsets, size = [], 0
+    for spec in specs:
+        offsets.append(size)
+        size += spec.end - spec.begin
+        size += -size % _SHARED_ALLOCATION_ALIGNMENT
+    allocation = torch.empty(size, dtype=torch.uint8, device=device)
+    return [
+        allocation[offset : offset + spec.end - spec.begin]
+        .view(spec.dtype)
+        .view(spec.shape)
+        for spec, offset in zip(specs, offsets)
+    ]
+
+
 class _FileLoad:
-    def __init__(self, path: str, specs: list[_TensorSpec], device: torch.device):
+    def __init__(
+        self,
+        path: str,
+        specs: list[_TensorSpec],
+        device: torch.device,
+        shared_allocation: bool,
+    ):
         self.path = path
         self.specs = specs
-        self.tensors = [
-            torch.empty(spec.shape, dtype=spec.dtype, device=device) for spec in specs
-        ]
+        if shared_allocation:
+            self.tensors = _views_of_one_allocation(specs, device)
+        else:
+            self.tensors = [
+                torch.empty(spec.shape, dtype=spec.dtype, device=device)
+                for spec in specs
+            ]
         self.bytes = sum(spec.end - spec.begin for spec in specs)
         self.remaining = 0
         self.done = threading.Event()
@@ -240,6 +271,22 @@ class PinnedParallelReader:
     ) -> Iterator[tuple[str, torch.Tensor]]:
         if to_cpu:
             raise ValueError(f"{self.name} reader only loads onto a device")
+        for _, tensors in self.iter_files(files, device=device, key_filter=key_filter):
+            yield from tensors
+
+    def iter_files(
+        self,
+        files: list[str],
+        *,
+        device: str,
+        key_filter: Callable[[str], bool] | None = None,
+        shared_allocation: bool = False,
+    ) -> Iterator[tuple[str, list[tuple[str, torch.Tensor]]]]:
+        """Each file with its selected tensors, in order, once they are on the device.
+
+        With ``shared_allocation`` the tensors of a file are views of one
+        allocation rather than allocations of their own.
+        """
         target = torch.device(device)
         free_bytes, _ = torch.cuda.mem_get_info(target)
         budget = min(_LOOKAHEAD_BYTES, int(free_bytes * _LOOKAHEAD_FREE_FRACTION))
@@ -249,22 +296,24 @@ class PinnedParallelReader:
         upcoming = deque(plans)
         try:
             while upcoming or pending:
-                self._admit(pool, upcoming, pending, target, budget)
+                self._admit(pool, upcoming, pending, target, budget, shared_allocation)
                 head = pending.popleft()
                 if isinstance(head, tuple):
-                    yield from self._fallback(head[0], target, key_filter)
+                    yield head[0], list(self._fallback(head[0], target, key_filter))
                     continue
                 head.done.wait()
                 if pool.error is not None:
                     raise pool.error
                 tensors, head.tensors = head.tensors, []
-                for spec, tensor in zip(head.specs, tensors):
-                    yield spec.name, tensor
+                yield (
+                    head.path,
+                    [(spec.name, tensor) for spec, tensor in zip(head.specs, tensors)],
+                )
         finally:
             pool.close()
 
     @staticmethod
-    def _admit(pool, upcoming, pending, target, budget) -> None:
+    def _admit(pool, upcoming, pending, target, budget, shared_allocation) -> None:
         in_flight = sum(load.bytes for load in pending if isinstance(load, _FileLoad))
         while upcoming:
             path, plan = upcoming[0]
@@ -277,7 +326,7 @@ class PinnedParallelReader:
             if pending and in_flight + size > budget:
                 return
             upcoming.popleft()
-            load = _FileLoad(path, specs, target)
+            load = _FileLoad(path, specs, target, shared_allocation)
             pool.submit(load, pieces)
             pending.append(load)
             in_flight += size

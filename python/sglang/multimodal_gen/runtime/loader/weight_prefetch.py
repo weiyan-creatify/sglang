@@ -86,11 +86,12 @@ def pipeline_weight_files(
     model_subfolder: str | None,
     model_variant: str | None,
     component_overrides: dict[str, str],
-) -> list[str]:
-    """Local safetensors files of the components the pipeline index declares.
+) -> dict[str, list[str]]:
+    """Local safetensors files of each component the pipeline index declares,
+    largest component first, which is the order the loaders take them in.
 
     An approximation the loaders refine. It never downloads, and a component
-    whose override is not a local path is left out.
+    whose override is not a local path has no files.
     """
     from sglang.multimodal_gen.runtime.managers.memory_managers.component_loading_order import (
         list_component_safetensors_files,
@@ -103,20 +104,34 @@ def pipeline_weight_files(
         model_variant=model_variant,
     )
     if root is None:
-        return []
+        return {}
     with open(os.path.join(root, "model_index.json")) as f:
         model_index = json.load(f)
-    files: list[str] = []
+    files: dict[str, list[str]] = {}
     for name, spec in model_index.items():
         if name.startswith("_") or not isinstance(spec, list) or spec[0] is None:
             continue
         component = component_overrides.get(name) or os.path.join(root, name)
-        files.extend(
+        files[name] = (
             list_component_safetensors_files(component)
             # Some components keep their weights one folder down.
             or sorted(glob.glob(os.path.join(component, "*", "*.safetensors")))
         )
-    return files
+    return dict(
+        sorted(
+            files.items(),
+            key=lambda item: -sum(map(os.path.getsize, item[1])),
+        )
+    )
+
+
+def _blob_paths(files: dict[str, list[str]]) -> list[str]:
+    # Hub caches link file names to shared blobs; read each blob once.
+    return list(
+        dict.fromkeys(
+            os.path.realpath(path) for paths in files.values() for path in paths
+        )
+    )
 
 
 def _host_memory_headroom_bytes() -> int | None:
@@ -149,11 +164,11 @@ def _chunks(files: list[tuple[str, int]]) -> list[tuple[str, int, int]]:
 
 
 def start_weight_prefetch(
-    paths: list[str],
+    files: dict[str, list[str]],
     *,
     on_done: Callable[[int, float], None] | None = None,
 ) -> int:
-    """Start helper processes that read ``paths`` once, and return the bytes planned.
+    """Start helper processes that read every file once, and return the bytes planned.
 
     Returns 0 without starting anything when there is nothing to read or the
     files would not fit in the page cache. ``on_done(bytes_read, seconds)`` runs
@@ -167,12 +182,8 @@ def start_weight_prefetch(
         elif on_done is not None:
             _done_callbacks.append(on_done)
         return _planned_bytes
-    # Hub caches link names to shared blobs; read each blob once.
-    files = [
-        (path, os.path.getsize(path))
-        for path in sorted(set(map(os.path.realpath, paths)))
-    ]
-    total = sum(size for _, size in files)
+    blobs = [(path, os.path.getsize(path)) for path in _blob_paths(files)]
+    total = sum(size for _, size in blobs)
     headroom = _host_memory_headroom_bytes()
     if (
         total == 0
@@ -183,7 +194,7 @@ def start_weight_prefetch(
         return 0
     fd, plan_path = tempfile.mkstemp(prefix="sglang-weight-prefetch-", suffix=".json")
     with os.fdopen(fd, "w") as plan:
-        json.dump(files, plan)
+        json.dump(blobs, plan)
     helpers = [
         subprocess.Popen(
             [

@@ -114,6 +114,7 @@ if TYPE_CHECKING:
     SGLANG_CACHE_DIT_SECONDARY_DMD_SVD_PRECISION: str = "medium"
     # model loading
     SGLANG_USE_RUNAI_MODEL_STREAMER: bool = True
+    SGLANG_DIFFUSION_WEIGHT_UPLOAD_ADDRESS: str | None = None
     SGLANG_LINGBOT_ENABLE_INTERACTIVE_KV_WINDOW: bool = False
     SGLANG_LINGBOT_LAZY_VAE_ENCODE_BLACK_FRAMES: int | None = None
     SGLANG_DIFFUSION_FLASHINFER_FP4_GEMM_BACKEND: str | None = None
@@ -458,6 +459,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # model loading
     "SGLANG_USE_RUNAI_MODEL_STREAMER": _lazy_bool(
         "SGLANG_USE_RUNAI_MODEL_STREAMER", "true"
+    ),
+    # Internal: the launcher sets it to the weight upload helper's socket;
+    # --weight-loader-prefetch-to-gpu is the knob.
+    "SGLANG_DIFFUSION_WEIGHT_UPLOAD_ADDRESS": _lazy_str(
+        "SGLANG_DIFFUSION_WEIGHT_UPLOAD_ADDRESS"
     ),
     "SGLANG_LINGBOT_ENABLE_INTERACTIVE_KV_WINDOW": _lazy_bool(
         "SGLANG_LINGBOT_ENABLE_INTERACTIVE_KV_WINDOW"

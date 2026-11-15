@@ -29,6 +29,7 @@ from sglang.multimodal_gen.runtime.loader.component_loaders.component_loader imp
     PipelineComponentLoader,
 )
 from sglang.multimodal_gen.runtime.loader.utils import _normalize_component_type
+from sglang.multimodal_gen.runtime.loader.weight_upload import close_weight_upload
 from sglang.multimodal_gen.runtime.managers.memory_managers.component_loading_order import (
     ComponentLoadSpec,
     order_component_load_specs,
@@ -709,6 +710,9 @@ class ComposedPipelineBase(ABC):
             if module_name in loaded_components:
                 logger.warning("Overwriting module %s", module_name)
             loaded_components[module_name] = module
+
+        # Frees whatever the upload helper holds that no loader asked for.
+        close_weight_upload()
 
         # Check if all required modules were loaded
         for module_name in required_modules:

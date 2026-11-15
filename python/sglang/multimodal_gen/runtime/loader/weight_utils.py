@@ -31,6 +31,7 @@ from sglang.multimodal_gen.runtime.loader.weight_readers import (
 from sglang.multimodal_gen.runtime.loader.weight_readers.runai_streamer import (
     HAS_RUNAI_MODEL_STREAMER,
 )
+from sglang.multimodal_gen.runtime.loader.weight_upload import take_uploaded_weights
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
@@ -265,14 +266,23 @@ def safetensors_weights_iterator(
 
     _raise_if_duplicate_safetensors_keys(duplicate_files_by_key)
 
-    yield from backend.iter_weights(
-        hf_weights_files,
-        device=device,
-        to_cpu=to_cpu,
-        key_filter=key_filter,
-        clone_tensors=clone_streamed_tensors,
-        show_progress=enable_tqdm,
-    )
+    remaining = list(hf_weights_files)
+    while remaining and torch.device(device).type == "cuda":
+        # Files the upload helper already put on the device; the rest are read here.
+        uploaded = take_uploaded_weights(remaining[0], key_filter)
+        if uploaded is None:
+            break
+        del remaining[0]
+        yield from uploaded
+    if remaining:
+        yield from backend.iter_weights(
+            remaining,
+            device=device,
+            to_cpu=to_cpu,
+            key_filter=key_filter,
+            clone_tensors=clone_streamed_tensors,
+            show_progress=enable_tqdm,
+        )
 
 
 def _load_pt_file(bin_file: str, device: str) -> dict:

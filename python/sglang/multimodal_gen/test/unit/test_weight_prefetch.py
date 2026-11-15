@@ -54,13 +54,14 @@ def test_helpers_run_without_site_packages_and_read_every_byte(tmp_path, monkeyp
         reported.append(bytes_read)
         done.set()
 
-    assert weight_prefetch.start_weight_prefetch(paths, on_done=on_done) == sum(sizes)
+    files = {"transformer": paths[:2], "vae": paths[2:]}
+    assert weight_prefetch.start_weight_prefetch(files, on_done=on_done) == sum(sizes)
     assert done.wait(timeout=120)
     assert reported == [sum(sizes)]
 
     # The launcher asks again once the server arguments resolve: nothing is read twice.
     with patch.object(subprocess, "Popen") as popen:
-        assert weight_prefetch.start_weight_prefetch(paths, on_done=on_done) == sum(
+        assert weight_prefetch.start_weight_prefetch(files, on_done=on_done) == sum(
             sizes
         )
     popen.assert_not_called()
@@ -74,7 +75,7 @@ def test_files_beyond_the_host_headroom_start_nothing(tmp_path, monkeypatch):
     path.write_bytes(b"x" * 90)
 
     with patch.object(subprocess, "Popen") as popen:
-        assert weight_prefetch.start_weight_prefetch([str(path)]) == 0
+        assert weight_prefetch.start_weight_prefetch({"vae": [str(path)]}) == 0
     popen.assert_not_called()
 
 
@@ -85,7 +86,7 @@ def test_plan_follows_the_pipeline_index_and_local_overrides(tmp_path):
         (tmp_path / name).mkdir()
         (tmp_path / name / "model.safetensors").write_bytes(b"x")
     override = tmp_path / "encoder.safetensors"
-    override.write_bytes(b"x")
+    override.write_bytes(b"xx")
     (tmp_path / "model_index.json").write_text(
         '{"_class_name": "Pipeline", "transformer": ["diffusers", "DiT"],'
         ' "vae": ["diffusers", "VAE"], "text_encoder": ["transformers", "Encoder"],'
@@ -99,9 +100,12 @@ def test_plan_follows_the_pipeline_index_and_local_overrides(tmp_path):
         component_overrides={"vae": "owner/repo/vae", "text_encoder": str(override)},
     )
 
-    assert files == [
-        str(tmp_path / "transformer" / "model.safetensors"),
-        str(override),
+    # Largest first: the loaders take components in that order.
+    assert list(files.items()) == [
+        ("text_encoder", [str(override)]),
+        ("transformer", [str(tmp_path / "transformer" / "model.safetensors")]),
+        ("vae", []),
+        ("scheduler", []),
     ]
 
 
@@ -126,7 +130,7 @@ def test_plan_reads_a_partition_only_when_the_arguments_name_it(tmp_path):
         )
 
     nested = str(tmp_path / "FL2VA" / "transformer" / "source" / "model.safetensors")
-    assert plan(model_variant="fl2va") == [nested]
-    assert plan(model_subfolder="FL2VA") == [nested]
-    assert plan() == []
-    assert plan(model_variant="hybrid") == []
+    assert plan(model_variant="fl2va") == {"transformer": [nested]}
+    assert plan(model_subfolder="FL2VA") == {"transformer": [nested]}
+    assert plan() == {}
+    assert plan(model_variant="hybrid") == {}

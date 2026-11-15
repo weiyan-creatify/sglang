@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 import os
+import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import torch
 
 from sglang.multimodal_gen.configs.models.dits.minimax_h3 import MiniMaxH3DiTConfig
 from sglang.multimodal_gen.configs.models.encoders.minimax_h3_qwen3vl import (
+    MINIMAX_H3_QWEN3VL_SELECTED_LM_LAYER,
     MiniMaxH3Qwen3VLConfig,
 )
 from sglang.multimodal_gen.configs.models.vaes.minimax_h3_audio import (
@@ -338,6 +341,21 @@ class MiniMaxH3PipelineConfig(PipelineConfig):
         if component_name == "video_vae":
             return [os.path.join(component_model_path, "source", "model.safetensors")]
         return safetensors_list
+
+    def weight_upload_key_filters(self) -> dict[str, Callable[[str], bool]]:
+        return {"text_encoder": _text_encoder_reads_weight}
+
+
+_LM_LAYER_RE = re.compile(r"(?:^|\.)layers\.(\d+)\.")
+
+
+def _text_encoder_reads_weight(name: str) -> bool:
+    # The encoder is consumed at an intermediate layer; the layers after it
+    # and the output head are a third of the checkpoint and go unread.
+    if name == "lm_head.weight":
+        return False
+    layer = _LM_LAYER_RE.search(name)
+    return layer is None or int(layer.group(1)) < MINIMAX_H3_QWEN3VL_SELECTED_LM_LAYER
 
 
 def vsa_h3_device_supported() -> bool:

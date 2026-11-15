@@ -464,6 +464,8 @@ class ServerArgs(DisaggServerArgsMixin):
     direct_gpu_weight_loading: bool = False
     # read the checkpoint into the page cache while the workers start
     weight_loader_prefetch_checkpoints: bool = False
+    # also upload the prefetched weights of direct-GPU components from a helper
+    weight_loader_prefetch_to_gpu: bool = False
     # if true, select the DiT layerwise group
     dit_layerwise_offload: bool | None = None
     layerwise_offload_components: list[str] | None = None
@@ -2812,6 +2814,15 @@ class ServerArgs(DisaggServerArgsMixin):
             "parallel helper processes while the workers start. Recommended for "
             "models on network storage; skipped when the checkpoint does not fit "
             "in host memory. Disabled by default.",
+        )
+        parser.add_argument(
+            "--weight-loader-prefetch-to-gpu",
+            action=StoreBoolean,
+            default=ServerArgs.weight_loader_prefetch_to_gpu,
+            help="With --weight-loader-prefetch-checkpoints, also upload the weights "
+            "of components that load directly on the GPU from a helper process "
+            "while the worker starts, so the loaders skip the host-to-device "
+            "pass. Single-GPU servers only. Disabled by default.",
         )
         parser.add_argument(
             "--cpu-offload-components",

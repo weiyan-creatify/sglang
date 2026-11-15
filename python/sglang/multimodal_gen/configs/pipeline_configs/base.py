@@ -765,6 +765,15 @@ class PipelineConfig:
     ) -> list[str]:
         return safetensors_list
 
+    def weight_upload_key_filters(self) -> dict[str, Callable[[str], bool]]:
+        """Per component, the checkpoint tensors its loader reads.
+
+        ``--weight-loader-prefetch-to-gpu`` uploads only those; a component
+        without a filter is uploaded whole. A filter is sent to the upload
+        helper, so it must be a module-level function.
+        """
+        return {}
+
     def get_pos_prompt_embeds(self, batch):
         return batch.prompt_embeds
 

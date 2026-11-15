@@ -14,7 +14,7 @@ import uvicorn
 
 from sglang.multimodal_gen.runtime.disaggregation.roles import RoleType
 from sglang.multimodal_gen.runtime.entrypoints.control_requests import ShutdownReq
-from sglang.multimodal_gen.runtime.loader import weight_prefetch
+from sglang.multimodal_gen.runtime.loader import weight_prefetch, weight_upload
 from sglang.multimodal_gen.runtime.managers.worker_bootstrap import (
     SchedulerProcessSpec,
     ServerArgsPayload,
@@ -231,6 +231,12 @@ def _log_weight_prefetch_done(bytes_read: int, seconds: float) -> None:
     )
 
 
+def _loads_weights_on_gpu(server_args: ServerArgs, component: str) -> bool:
+    if component.startswith("transformer"):
+        return server_args.direct_gpu_weight_loading
+    return server_args.should_direct_gpu_weight_load_component(component)
+
+
 def _start_weight_prefetch(server_args: ServerArgs) -> None:
     """Warm the page cache with the pipeline's weights while the workers start."""
     if not server_args.weight_loader_prefetch_checkpoints:
@@ -251,9 +257,19 @@ def _start_weight_prefetch(server_args: ServerArgs) -> None:
     if planned_bytes:
         logger.info(
             "[server-load] weight prefetch: %d files, %.1f GB",
-            len(files),
+            sum(map(len, files.values())),
             planned_bytes / 1e9,
         )
+        if server_args.weight_loader_prefetch_to_gpu and server_args.num_gpus == 1:
+            key_filters = server_args.pipeline_config.weight_upload_key_filters()
+            # Same order as the page-cache readers, which the helper follows.
+            gpu_bound = [
+                (list(map(os.path.realpath, paths)), key_filters.get(component))
+                for component, paths in files.items()
+                if paths and _loads_weights_on_gpu(server_args, component)
+            ]
+            if gpu_bound:
+                weight_upload.start_weight_upload(gpu_bound)
     else:
         logger.info(
             "[server-load] weight prefetch skipped: no local safetensors weights "
