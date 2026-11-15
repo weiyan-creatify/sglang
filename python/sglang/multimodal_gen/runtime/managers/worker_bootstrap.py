@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import gc
 import logging
+import multiprocessing as mp
+import os
 import pickle
 import sys
 from dataclasses import dataclass, field
@@ -28,6 +30,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from multiprocessing.connection import Connection
+    from multiprocessing.process import BaseProcess
 
     from sglang.multimodal_gen.runtime.server_args import ServerArgs
 
@@ -133,21 +136,7 @@ def bootstrap_scheduler_process(spec: SchedulerProcessSpec) -> None:
         _warn_if_runtime_imported_early()
 
     with defer_full_gc_for_imports():
-        # Platform initialization is the first extensible runtime action. In
-        # particular it precedes plugin callbacks and hook target resolution, both
-        # of which may import arbitrary runtime modules.
-        from sglang.multimodal_gen.runtime.platforms import initialize_current_platform
-
-        initialize_current_platform()
-
-        from sglang.multimodal_gen.runtime.platforms.plugins import (
-            apply_plugin_hooks,
-            load_plugins,
-        )
-
-        load_plugins()
-        apply_plugin_hooks()
-
+        _initialize_worker_runtime()
         server_args = spec.server_args.materialize()
 
         # Resolve the function from its module after hook application. A ``from``
@@ -171,6 +160,130 @@ def _cache_package_metadata() -> None:
     )
 
     cache_package_metadata()
+
+
+def _initialize_worker_runtime() -> None:
+    """Platform, plugins and hooks, in the order every worker entry needs."""
+    # Platform initialization is the first extensible runtime action. In
+    # particular it precedes plugin callbacks and hook target resolution, both
+    # of which may import arbitrary runtime modules.
+    from sglang.multimodal_gen.runtime.platforms import initialize_current_platform
+
+    initialize_current_platform()
+
+    from sglang.multimodal_gen.runtime.platforms.plugins import (
+        apply_plugin_hooks,
+        load_plugins,
+    )
+
+    load_plugins()
+    apply_plugin_hooks()
+
+
+def prestart_scheduler_process(connection: Connection, warn_early: bool) -> None:
+    """Import the worker runtime, then serve the spec the launcher sends.
+
+    The imports are most of a worker's startup and need no server arguments, so
+    they run while the launcher is still resolving them.
+    """
+    from sglang.multimodal_gen.runtime.utils.process import (
+        defer_full_gc_for_imports,
+        kill_itself_when_parent_died,
+    )
+
+    kill_itself_when_parent_died()
+    _cache_package_metadata()
+    if warn_early:
+        _warn_if_runtime_imported_early()
+    with defer_full_gc_for_imports():
+        _initialize_worker_runtime()
+        from sglang.multimodal_gen.runtime.managers import gpu_worker
+
+        _freeze_imported_heap()
+
+    handoff = connection.recv()
+    if handoff is None:
+        return
+    spec, environ_changes = handoff
+    # The launcher may set variables (allocator, NCCL) after this process started.
+    for key, value in environ_changes.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+    with defer_full_gc_for_imports():
+        server_args = spec.server_args.materialize()
+    gpu_worker.run_scheduler_process(
+        local_rank=spec.local_rank,
+        rank=spec.rank,
+        server_args=server_args,
+        pipe_writer=connection,
+    )
+
+
+_PRESTARTED: list[tuple[BaseProcess, Connection]] = []
+_PRESTART_ENVIRON: dict[str, str] = {}
+
+
+def prestart_scheduler_processes(count: int) -> None:
+    """Spawn ``count`` workers now; launch_server claims them once ready to."""
+    context = mp.get_context("spawn")
+    _PRESTART_ENVIRON.clear()
+    _PRESTART_ENVIRON.update(os.environ)
+    for index in range(count):
+        parent, child = context.Pipe()
+        process = context.Process(
+            target=prestart_scheduler_process,
+            args=(child, index == 0),
+            name=f"sglang-diffusionWorker-{index}",
+            daemon=True,
+        )
+        process.start()
+        child.close()
+        _PRESTARTED.append((process, parent))
+
+
+def claim_prestarted_scheduler_processes(
+    count: int,
+) -> list[tuple[BaseProcess, Connection]]:
+    """The prestarted workers if they are exactly the ``count`` needed."""
+    workers = list(_PRESTARTED)
+    _PRESTARTED.clear()
+    if len(workers) == count:
+        return workers
+    _release(workers)
+    return []
+
+
+def release_prestarted_scheduler_processes() -> None:
+    """Let unclaimed prestarted workers exit; for launch paths that spawn their own."""
+    workers = list(_PRESTARTED)
+    _PRESTARTED.clear()
+    _release(workers)
+
+
+def _release(workers: list[tuple[BaseProcess, Connection]]) -> None:
+    for process, connection in workers:
+        try:
+            connection.send(None)
+        except OSError:
+            pass
+        connection.close()
+    for process, _ in workers:
+        process.join(timeout=5)
+        if process.is_alive():
+            process.kill()
+
+
+def environ_changes_since_prestart() -> dict[str, str | None]:
+    """Variables set or removed since prestart; a removed one maps to None."""
+    changes: dict[str, str | None] = {
+        key: value
+        for key, value in os.environ.items()
+        if _PRESTART_ENVIRON.get(key) != value
+    }
+    changes.update({key: None for key in _PRESTART_ENVIRON if key not in os.environ})
+    return changes
 
 
 def bootstrap_http_server_process(

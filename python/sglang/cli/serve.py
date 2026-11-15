@@ -125,11 +125,38 @@ def _suppress_noisy_warnings() -> None:
     suppress_noisy_warnings()
 
 
+def _prestart_diffusion_workers(argv: list[str]) -> None:
+    """Start single-node workers before the server arguments are resolved.
+
+    A worker spends most of its startup importing the runtime, which needs no
+    arguments; launch_server hands the spec to these workers once it has one.
+    Other topologies keep starting their workers after argument resolution.
+    """
+    pre = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    pre.add_argument("--num-gpus", type=int, default=1)
+    pre.add_argument("--nnodes", type=int, default=1)
+    pre.add_argument("--config", default=None)
+    pre.add_argument("--disagg-role", default=None)
+    try:
+        known, _ = pre.parse_known_args(argv)
+    except SystemExit:
+        return
+    if known.config or known.disagg_role or known.nnodes != 1 or known.num_gpus < 1:
+        return
+    from sglang.multimodal_gen.runtime.managers.worker_bootstrap import (
+        prestart_scheduler_processes,
+    )
+
+    prestart_scheduler_processes(known.num_gpus)
+
+
 def _run_diffusion(request: ServeRequest) -> None:
     if any(arg in request.argv for arg in ("-h", "--help")):
         _print_diffusion_help(request)
         return
 
+    argv = list(request.argv)
+    _prestart_diffusion_workers(argv)
     _suppress_noisy_warnings()
 
     from sglang.multimodal_gen.runtime.platforms.plugins import apply_plugin_hooks

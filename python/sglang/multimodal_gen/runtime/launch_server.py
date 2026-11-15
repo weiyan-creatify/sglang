@@ -19,6 +19,9 @@ from sglang.multimodal_gen.runtime.managers.worker_bootstrap import (
     ServerArgsPayload,
     bootstrap_http_server_process,
     bootstrap_scheduler_process,
+    claim_prestarted_scheduler_processes,
+    environ_changes_since_prestart,
+    release_prestarted_scheduler_processes,
 )
 from sglang.multimodal_gen.runtime.observability.metrics import (
     configure_metrics,
@@ -142,15 +145,28 @@ def _start_scheduler_processes(
     server_args: ServerArgsPayload,
     ranks: list[tuple[int, int]],
     name_prefix: str,
+    prestarted: list | None = None,
 ) -> list[mp.Process]:
-    """Spawn a worker group, owning its pipes and children until all ranks are ready."""
+    """Spawn a worker group, owning its pipes and children until all ranks are ready.
+
+    ``prestarted`` workers, one per rank in order, have already imported the
+    runtime and only receive their spec.
+    """
     context = mp.get_context("spawn")
     processes = []
     pending = {}
     with ExitStack() as pipes:
         try:
+            for (local_rank, rank), (process, connection) in zip(
+                ranks, prestarted or []
+            ):
+                pipes.enter_context(connection)
+                spec = SchedulerProcessSpec(local_rank, rank, server_args, None)
+                connection.send((spec, environ_changes_since_prestart()))
+                processes.append(process)
+                pending[connection] = process
             # all ranks must start before any waits for NCCL initialization
-            for local_rank, rank in ranks:
+            for local_rank, rank in ranks[len(processes) :]:
                 reader, writer = context.Pipe(duplex=False)
                 pipes.enter_context(reader)
                 pipes.enter_context(writer)
@@ -232,6 +248,7 @@ def launch_server(server_args: ServerArgs, launch_http_server: bool = True):
         server_args_payload,
         [(i, rank_offset + i) for i in range(local_num_gpus)],
         "sglang-diffusionWorker-",
+        prestarted=claim_prestarted_scheduler_processes(local_num_gpus),
     )
 
     logger.debug("All workers are ready")
@@ -705,6 +722,8 @@ def dispatch_launch(server_args: ServerArgs):
         os.environ["NCCL_NVLS_ENABLE"] = str(int(server_args.enable_nccl_nvls))
 
     role = server_args.disagg_role
+    if role != RoleType.MONOLITHIC:
+        release_prestarted_scheduler_processes()
     if role == RoleType.MONOLITHIC:
         launch_server(server_args)
     elif role == RoleType.SERVER:
