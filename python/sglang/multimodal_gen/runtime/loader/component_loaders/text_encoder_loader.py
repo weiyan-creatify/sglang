@@ -451,6 +451,13 @@ class TextEncoderLoader(OnlineQuantizationComponentLoader):
             or component_name in server_args.component_quantizations
         )
 
+    def resolve_component_direct_gpu_loading(
+        self, server_args: ServerArgs, component_name: str
+    ) -> bool:
+        # load_weights copies each checkpoint tensor into its allocated
+        # parameter; a device-resident source only moves where that copy starts.
+        return server_args.should_direct_gpu_weight_load_component(component_name)
+
     def validate_component_weight_override(self, override: str) -> None:
         if names_gguf_checkpoint(override):
             if not current_platform.is_cuda():
@@ -571,6 +578,9 @@ class TextEncoderLoader(OnlineQuantizationComponentLoader):
                 encoder_dtype,
                 component_starts_on_cpu=component_starts_on_cpu,
                 component_name=component_name,
+                direct_gpu_weight_loading=self.resolve_component_direct_gpu_loading(
+                    server_args, component_name
+                ),
             )
         except ComponentCheckpointUnsupportedError:
             raise
@@ -639,9 +649,15 @@ class TextEncoderLoader(OnlineQuantizationComponentLoader):
         dtype: str = "fp16",
         component_starts_on_cpu: bool | None = None,
         component_name: str = "text_encoder",
+        direct_gpu_weight_loading: bool = False,
     ):
         local_torch_device = get_local_torch_device()
         quant_config = model_config.quant_config
+        if direct_gpu_weight_loading and quant_config is not None:
+            raise ComponentCheckpointUnsupportedError(
+                f"Direct GPU weight loading of {component_name!r} supports only "
+                "unquantized checkpoints"
+            )
         param_dtype = PRECISION_TO_TYPE[dtype]
         if quant_config is not None:
             if param_dtype not in quant_config.get_supported_act_dtypes():
@@ -750,11 +766,12 @@ class TextEncoderLoader(OnlineQuantizationComponentLoader):
                     key_filter=model.should_materialize_checkpoint_weight,
                 )
             else:
-                # copy into the allocated parameters without a second GPU weight tensor
+                # Host reads copy into the allocated parameters without a second
+                # GPU weight tensor; direct reads keep only the tensors in flight.
                 checkpoint_weights = self._get_all_weights(
                     model,
                     model_path,
-                    to_cpu=True,
+                    to_cpu=component_starts_on_cpu or not direct_gpu_weight_loading,
                 )
             if isinstance(quant_config, QuantoInt8Config):
                 checkpoint_weights = normalize_quanto_int8_weights(checkpoint_weights)
