@@ -14,7 +14,7 @@ import sys
 import tempfile
 from dataclasses import field
 from enum import Enum
-from typing import Any, List, Optional
+from typing import TYPE_CHECKING, Any, List, Optional
 
 import addict
 import yaml
@@ -33,9 +33,6 @@ from sglang.multimodal_gen.configs.quantization.nunchaku import NunchakuSVDQuant
 from sglang.multimodal_gen.configs.quantization.qvg_kv import QVGKVQuantArgs
 from sglang.multimodal_gen.configs.utils import expand_path_fields
 from sglang.multimodal_gen.runtime.disaggregation.roles import RoleType
-from sglang.multimodal_gen.runtime.layers.quantization.configs.nunchaku_config import (
-    NunchakuConfig,
-)
 from sglang.multimodal_gen.runtime.loader.utils import BYTES_PER_GB
 from sglang.multimodal_gen.runtime.managers.memory_managers.component_residency import (
     COMPONENT_OFFLOAD,
@@ -94,6 +91,12 @@ from sglang.multimodal_gen.runtime.utils.precision_types import PRECISION_TO_TYP
 from sglang.multimodal_gen.runtime.weights.source import (
     is_explicit_weight_file_reference,
 )
+
+if TYPE_CHECKING:
+    # The runtime config imports the quantized linear layers; only annotated here.
+    from sglang.multimodal_gen.runtime.layers.quantization.configs.nunchaku_config import (
+        NunchakuConfig,
+    )
 
 logger = init_logger(__name__)
 
@@ -552,7 +555,7 @@ class ServerArgs(DisaggServerArgsMixin):
     disable_autocast: bool | None = None
 
     # Quantization / Nunchaku SVDQuant configuration
-    nunchaku_config: NunchakuSVDQuantArgs | NunchakuConfig | None = field(
+    nunchaku_config: "NunchakuSVDQuantArgs | NunchakuConfig | None" = field(
         default_factory=NunchakuSVDQuantArgs, repr=False
     )
 
@@ -968,7 +971,7 @@ class ServerArgs(DisaggServerArgsMixin):
         """
 
         ncfg = self.nunchaku_config
-        if ncfg is None or isinstance(ncfg, NunchakuConfig):
+        if not isinstance(ncfg, NunchakuSVDQuantArgs):
             return
 
         resolution = ncfg.resolve_runtime_config()

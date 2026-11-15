@@ -7,34 +7,52 @@ Diffusion pipelines for sglang.multimodal_gen.
 This package contains diffusion pipelines for generating videos and images.
 """
 
-from typing import cast
+from typing import TYPE_CHECKING, Any, cast
 
-from sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base import (
-    ComposedPipelineBase,
-)
-from sglang.multimodal_gen.runtime.pipelines_core.lora.pipeline import LoRAPipeline
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
-from sglang.multimodal_gen.runtime.utils.hf_diffusers_utils import (
-    maybe_download_model as maybe_download_model,
-)
-from sglang.multimodal_gen.runtime.utils.hf_diffusers_utils import (
-    verify_model_config_and_directory as verify_model_config_and_directory,
-)
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
+
+if TYPE_CHECKING:
+    from sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base import (
+        ComposedPipelineBase,
+    )
+    from sglang.multimodal_gen.runtime.pipelines_core.lora.pipeline import (
+        LoRAPipeline,
+    )
+
+    class PipelineWithLoRA(LoRAPipeline, ComposedPipelineBase):
+        """Type for a pipeline that has both ComposedPipelineBase and LoRAPipeline functionality."""
+
 
 logger = init_logger(__name__)
 
 
-class PipelineWithLoRA(LoRAPipeline, ComposedPipelineBase):
-    """Type for a pipeline that has both ComposedPipelineBase and LoRAPipeline functionality."""
+def __getattr__(name: str) -> Any:
+    # The pipeline classes and hub helpers import every loader, model layer and
+    # diffusers; light importers of this package (Req, schedule_batch) must not.
+    if name == "ComposedPipelineBase":
+        from sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base import (
+            ComposedPipelineBase,
+        )
 
-    pass
+        return ComposedPipelineBase
+    if name == "LoRAPipeline":
+        from sglang.multimodal_gen.runtime.pipelines_core.lora.pipeline import (
+            LoRAPipeline,
+        )
+
+        return LoRAPipeline
+    if name in ("maybe_download_model", "verify_model_config_and_directory"):
+        from sglang.multimodal_gen.runtime.utils import hf_diffusers_utils
+
+        return getattr(hf_diffusers_utils, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def build_pipeline(
     server_args: ServerArgs,
-) -> PipelineWithLoRA:
+) -> "PipelineWithLoRA":
     """
     Only works with valid hf diffusers configs. (model_index.json)
     We want to build a pipeline based on the inference args mode_path:
@@ -81,7 +99,7 @@ def build_pipeline(
 
     logger.info("Pipeline instantiated")
 
-    return cast(PipelineWithLoRA, pipeline)
+    return cast("PipelineWithLoRA", pipeline)
 
 
 __all__ = [

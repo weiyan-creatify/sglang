@@ -82,7 +82,10 @@ class TestLaunchServerShutdown(unittest.TestCase):
                 patch.object(ls, "configure_logger"),
                 patch.object(ls, "_find_available_port", side_effect=lambda port: port),
                 patch.object(ls, "_start_scheduler_processes", side_effect=starts),
-                patch.object(ls, "DiffusionServer", return_value=router),
+                patch(
+                    "sglang.multimodal_gen.runtime.disaggregation.orchestrator.DiffusionServer",
+                    return_value=router,
+                ),
             ):
                 with self.assertRaises(RuntimeError):
                     ls.launch_pool_disagg_server(args, [[0]], [[1]], [[0]])
@@ -181,7 +184,9 @@ class TestLaunchServerShutdown(unittest.TestCase):
                 with (
                     patch.object(ls, "init_diffusion_tracing"),
                     patch.object(ls, "set_global_server_args"),
-                    patch.object(ls, "create_app"),
+                    patch(
+                        "sglang.multimodal_gen.runtime.entrypoints.http_server.create_app"
+                    ),
                     patch.object(ls.uvicorn, "run") as run,
                 ):
                     ls.launch_http_server_only(server_args)

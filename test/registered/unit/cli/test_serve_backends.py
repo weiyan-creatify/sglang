@@ -183,7 +183,7 @@ class TestServeBackendRegistry(unittest.TestCase):
 
 
 class TestServeBackendDispatch(unittest.TestCase):
-    @patch("sglang.cli.serve.kill_process_tree")
+    @patch("sglang.srt.utils.kill_process_tree")
     @patch("sglang.srt.plugins.load_plugins")
     @patch("sglang.cli.serve._create_backend_registry")
     def test_explicit_backend_receives_normalized_model_path(
@@ -209,7 +209,7 @@ class TestServeBackendDispatch(unittest.TestCase):
         mock_load_plugins.assert_called_once_with()
         mock_kill.assert_called_once()
 
-    @patch("sglang.cli.serve.kill_process_tree")
+    @patch("sglang.srt.utils.kill_process_tree")
     @patch("sglang.srt.plugins.load_plugins")
     @patch("sglang.cli.serve._create_backend_registry")
     def test_explicit_backend_can_support_config_only_requests(
@@ -226,7 +226,7 @@ class TestServeBackendDispatch(unittest.TestCase):
         self.assertIsNone(request.model_path)
         self.assertEqual(request.argv, ("--config", "pipeline.yaml"))
 
-    @patch("sglang.cli.serve.kill_process_tree")
+    @patch("sglang.srt.utils.kill_process_tree")
     @patch("sglang.srt.plugins.load_plugins")
     @patch("sglang.cli.serve._create_backend_registry")
     def test_auto_detection_uses_registry(
@@ -242,7 +242,7 @@ class TestServeBackendDispatch(unittest.TestCase):
         registry.auto_detect.assert_called_once()
         backend.run.assert_called_once()
 
-    @patch("sglang.cli.serve.kill_process_tree")
+    @patch("sglang.srt.utils.kill_process_tree")
     @patch("sglang.srt.plugins.load_plugins")
     @patch("sglang.cli.serve._create_backend_registry")
     def test_targeted_help_is_forwarded_without_startup_or_model_path(
@@ -406,7 +406,7 @@ class TestServeDirectLaunch(CustomTestCase):
                 patch("sglang.cli.serve_backends.entry_points", return_value=[])
             )
             stack.enter_context(patch("sglang.srt.plugins.load_plugins"))
-            stack.enter_context(patch("sglang.cli.serve.kill_process_tree"))
+            stack.enter_context(patch("sglang.srt.utils.kill_process_tree"))
             serve(None, list(argv))
         return ran
 

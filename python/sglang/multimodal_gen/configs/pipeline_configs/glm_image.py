@@ -2,7 +2,6 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 
 import torch
-from diffusers.image_processor import VaeImageProcessor
 
 from sglang.multimodal_gen.configs.models import DiTConfig, VAEConfig
 from sglang.multimodal_gen.configs.models.dits.glmimage import GlmImageDitConfig
@@ -56,6 +55,9 @@ class GlmImagePipelineConfig(SpatialImagePipelineConfig):
     enable_autocast: bool = False
 
     def __post_init__(self):
+        # diffusers costs seconds to import; every pipeline config module loads at startup.
+        from diffusers.image_processor import VaeImageProcessor
+
         self.vae_scale_factor = self.vae_config.get_vae_scale_factor()
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
 

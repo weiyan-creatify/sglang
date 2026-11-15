@@ -7,8 +7,6 @@ import shlex
 import sys
 from importlib import resources
 
-from sglang.srt.utils.device import get_device_count, get_device_name, is_hip
-
 # Picked in this order when the user does not choose a mode.
 MODES = ("balanced", "low-latency", "high-throughput")
 NO_MODE_MESSAGE = (
@@ -55,6 +53,8 @@ def recipes_for_this_machine(model: str) -> list[dict]:
     hw = _hardware_id(device_name)
     matching = [r for r in recipes if r["hw"] == hw and r["gpus"] == gpus]
     if not matching:
+        from sglang.srt.utils.device import is_hip
+
         machine = f"{gpus}x {device_name}" if gpus else "this machine (no GPU)"
         available = ", ".join(sorted({f"{r['gpus']}x {r['hw']}" for r in recipes}))
         devices_env = "HIP_VISIBLE_DEVICES" if is_hip() else "CUDA_VISIBLE_DEVICES"
@@ -217,6 +217,9 @@ def _load_recipes(model: str) -> list[dict]:
 
 
 def _detect_gpus() -> tuple[str | None, int]:
+    # srt.utils imports torch; `sglang serve` starts diffusion workers before that.
+    from sglang.srt.utils.device import get_device_count, get_device_name
+
     count = get_device_count()
     return (get_device_name() if count else None), count
 

@@ -2,7 +2,6 @@
 from dataclasses import dataclass, field
 
 import torch
-from diffusers.image_processor import VaeImageProcessor
 
 from sglang.multimodal_gen.configs.models import DiTConfig, VAEConfig
 from sglang.multimodal_gen.configs.models.dits.krea2 import Krea2DitConfig
@@ -53,6 +52,9 @@ class Krea2PipelineConfig(ImagePipelineConfig):
     pinned_mu: float | None = 1.15
 
     def __post_init__(self):
+        # diffusers costs seconds to import; every pipeline config module loads at startup.
+        from diffusers.image_processor import VaeImageProcessor
+
         self.vae_scale_factor = self.vae_config.get_vae_scale_factor()
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
 

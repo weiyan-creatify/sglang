@@ -1,12 +1,14 @@
 import math
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional
+from typing import TYPE_CHECKING, Callable, List, Optional
 
 import PIL
 import torch
-from diffusers.image_processor import VaeImageProcessor
 
 from sglang.multimodal_gen.configs.models import DiTConfig, EncoderConfig, VAEConfig
+
+if TYPE_CHECKING:
+    from diffusers.image_processor import VaeImageProcessor
 from sglang.multimodal_gen.configs.models.dits.flux import FluxConfig
 from sglang.multimodal_gen.configs.models.encoders import (
     BaseEncoderOutput,
@@ -608,7 +610,11 @@ class Flux2PipelineConfig(FluxPipelineConfig):
         return super().prepare_calculated_size(image) or (image.width, image.height)
 
     def preprocess_condition_image(
-        self, image, target_width, target_height, vae_image_processor: VaeImageProcessor
+        self,
+        image,
+        target_width,
+        target_height,
+        vae_image_processor: "VaeImageProcessor",
     ):
         target_area = 1024 * 1024
         if image.mode == "RGB":
