@@ -150,6 +150,49 @@ def _prestart_diffusion_workers(argv: list[str]) -> None:
     prestart_scheduler_processes(known.num_gpus)
 
 
+def _prefetch_diffusion_weights(argv: list[str], model_path: str | None) -> None:
+    """Start the weight prefetch from the raw command line.
+
+    launch_server starts it once the server arguments resolve, seconds later,
+    and still does when a flag here may change which files the pipeline loads.
+    """
+    from sglang.multimodal_gen.runtime.loader import weight_prefetch
+    from sglang.multimodal_gen.runtime.utils.argparse import StoreBoolean
+
+    pre = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    # Same default as ServerArgs.weight_loader_prefetch_checkpoints.
+    pre.add_argument(
+        "--weight-loader-prefetch-checkpoints", action=StoreBoolean, default=False
+    )
+    pre.add_argument("--model-path", default=None)
+    pre.add_argument("--revision", default=None)
+    pre.add_argument("--model-subfolder", default=None)
+    pre.add_argument("--model-variant", default=None)
+    try:
+        known, rest = pre.parse_known_args(argv)
+    except (SystemExit, ValueError):
+        return
+    # Any other path flag may replace a component; leave those to launch_server.
+    replaces_a_component = any(
+        arg.startswith("--") and "path" in arg.split("=", 1)[0] for arg in rest
+    )
+    if (
+        model_path is None
+        or not known.weight_loader_prefetch_checkpoints
+        or replaces_a_component
+    ):
+        return
+    weight_prefetch.start_weight_prefetch(
+        weight_prefetch.pipeline_weight_files(
+            model_path,
+            revision=known.revision,
+            model_subfolder=known.model_subfolder,
+            model_variant=known.model_variant,
+            component_overrides={},
+        )
+    )
+
+
 def _run_diffusion(request: ServeRequest) -> None:
     if any(arg in request.argv for arg in ("-h", "--help")):
         _print_diffusion_help(request)
@@ -157,6 +200,7 @@ def _run_diffusion(request: ServeRequest) -> None:
 
     argv = list(request.argv)
     _prestart_diffusion_workers(argv)
+    _prefetch_diffusion_weights(argv, request.model_path)
     _suppress_noisy_warnings()
 
     from sglang.multimodal_gen.runtime.platforms.plugins import apply_plugin_hooks

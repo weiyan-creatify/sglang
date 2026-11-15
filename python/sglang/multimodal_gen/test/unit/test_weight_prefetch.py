@@ -10,6 +10,13 @@ import pytest
 from sglang.multimodal_gen.runtime.loader import weight_prefetch
 
 
+@pytest.fixture(autouse=True)
+def _no_running_prefetch(monkeypatch):
+    monkeypatch.setattr(weight_prefetch, "_planned_bytes", 0)
+    monkeypatch.setattr(weight_prefetch, "_done_callbacks", [])
+    monkeypatch.setattr(weight_prefetch, "_result", None)
+
+
 def test_chunks_tile_every_file_exactly(monkeypatch):
     """Helpers read by chunk, so a gap would leave part of a file cold and an
     overlap would read it twice, both without any error."""
@@ -50,6 +57,14 @@ def test_helpers_run_without_site_packages_and_read_every_byte(tmp_path, monkeyp
     assert weight_prefetch.start_weight_prefetch(paths, on_done=on_done) == sum(sizes)
     assert done.wait(timeout=120)
     assert reported == [sum(sizes)]
+
+    # The launcher asks again once the server arguments resolve: nothing is read twice.
+    with patch.object(subprocess, "Popen") as popen:
+        assert weight_prefetch.start_weight_prefetch(paths, on_done=on_done) == sum(
+            sizes
+        )
+    popen.assert_not_called()
+    assert reported == [sum(sizes)] * 2
 
 
 def test_files_beyond_the_host_headroom_start_nothing(tmp_path, monkeypatch):

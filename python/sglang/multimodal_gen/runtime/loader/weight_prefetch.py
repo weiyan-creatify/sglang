@@ -31,6 +31,12 @@ _THREADS_PER_PROCESS = 4
 # Arbitrary; leaves room for the workers' own host memory while they load.
 _MAX_PAGE_CACHE_FRACTION = 0.8
 
+# One prefetch per launcher: the command line starts it before the server
+# arguments resolve, and launch_server then asks for the same files again.
+_planned_bytes = 0
+_done_callbacks: list[Callable[[int, float], None]] = []
+_result: tuple[int, float] | None = None
+
 
 def _pipeline_root(
     model_path: str,
@@ -151,8 +157,16 @@ def start_weight_prefetch(
 
     Returns 0 without starting anything when there is nothing to read or the
     files would not fit in the page cache. ``on_done(bytes_read, seconds)`` runs
-    on a background thread after the last helper exits.
+    on a background thread after the last helper exits. A later call returns
+    the running prefetch's plan and only adds its ``on_done``.
     """
+    global _planned_bytes, _result
+    if _planned_bytes:
+        if on_done is not None and _result is not None:
+            on_done(*_result)
+        elif on_done is not None:
+            _done_callbacks.append(on_done)
+        return _planned_bytes
     # Hub caches link names to shared blobs; read each blob once.
     files = [
         (path, os.path.getsize(path))
@@ -191,14 +205,19 @@ def start_weight_prefetch(
     start = time.monotonic()
 
     def reap() -> None:
+        global _result
         bytes_read = 0
         for helper in helpers:
             output, _ = helper.communicate()
             bytes_read += int(output.strip() or 0)
         os.unlink(plan_path)
-        if on_done is not None:
-            on_done(bytes_read, time.monotonic() - start)
+        _result = (bytes_read, time.monotonic() - start)
+        for callback in _done_callbacks:
+            callback(*_result)
 
+    if on_done is not None:
+        _done_callbacks.append(on_done)
+    _planned_bytes = total
     threading.Thread(target=reap, name="weight-prefetch-reap", daemon=True).start()
     return total
 
