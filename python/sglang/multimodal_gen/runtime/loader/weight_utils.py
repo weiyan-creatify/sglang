@@ -248,7 +248,9 @@ def safetensors_weights_iterator(
         # to a local file headed for the CPU.
         requested = FALLBACK_READER.name
     backend = select_weight_reader(
-        requested=requested, needs_key_filter=key_filter is not None
+        requested=requested,
+        needs_key_filter=key_filter is not None,
+        device_bound=torch.device(device).type == "cuda",
     )
 
     # validation must not modify checkpoints or shared cache blobs
