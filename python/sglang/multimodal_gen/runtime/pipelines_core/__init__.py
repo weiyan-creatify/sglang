@@ -71,14 +71,13 @@ def build_pipeline(
             get_registered_pipeline_names,
         )
 
-        available_pipelines = get_registered_pipeline_names()
         logger.info(f"Requested pipeline_class_name: {server_args.pipeline_class_name}")
-        logger.info(f"Available pipelines in registry: {available_pipelines}")
         pipeline_cls = get_pipeline_class(server_args.pipeline_class_name)
         if pipeline_cls is None:
+            # Listing the alternatives imports every pipeline; only on failure.
             raise ValueError(
                 f"Pipeline class '{server_args.pipeline_class_name}' not found in registry. "
-                f"Available pipelines: {available_pipelines}"
+                f"Available pipelines: {get_registered_pipeline_names()}"
             )
         logger.info(
             f"✓ Using explicitly specified pipeline: {server_args.pipeline_class_name} (class: {pipeline_cls.__name__})"

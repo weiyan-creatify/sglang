@@ -513,6 +513,9 @@ def register():
                 and "vdn" not in model_id.lower()
             )
         ],
+        pipeline_config_registry_entries={
+            "MiniMaxH3Pipeline": (MiniMaxH3PipelineConfig, MiniMaxH3SamplingParams)
+        },
     )
     register_configs(
         sampling_param_cls=FastH3SamplingParams,
