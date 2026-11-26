@@ -9,8 +9,10 @@ information based on model paths or other identifiers.
 
 import dataclasses
 import importlib
+import importlib.util
 import os
 import pkgutil
+import re
 from functools import lru_cache
 from typing import (
     TYPE_CHECKING,
@@ -25,6 +27,11 @@ from typing import (
 )
 
 if TYPE_CHECKING:
+    # Importing the base pipeline imports every component loader, which
+    # resolving a model's configs does not need.
+    from sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base import (
+        ComposedPipelineBase,
+    )
     from sglang.multimodal_gen.runtime.server_args import Backend
 
 from sglang.multimodal_gen.configs.pipeline_configs.base import PipelineConfig
@@ -46,9 +53,6 @@ from sglang.multimodal_gen.configs.sensenova_u1 import (
     is_sensenova_u1_adapter_only_model,
     is_sensenova_u1_model,
 )
-from sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base import (
-    ComposedPipelineBase,
-)
 from sglang.multimodal_gen.runtime.utils.external_model_package import (
     load_external_model_package,
 )
@@ -63,12 +67,69 @@ logger = init_logger(__name__)
 
 # --- Part 1: Pipeline Discovery ---
 
-_PIPELINE_REGISTRY: Dict[str, Type[ComposedPipelineBase]] = {}
+_PIPELINE_REGISTRY: Dict[str, Type["ComposedPipelineBase"]] = {}
 _BUILTIN_PIPELINES_DISCOVERED = False
 
 # Registry for pipeline configuration classes (for safetensors files without model_index.json)
 # Maps pipeline_class_name -> (PipelineConfig class, SamplingParams class)
 _PIPELINE_CONFIG_REGISTRY: Dict[str, Tuple[Type[PipelineConfig], Type[Any]]] = {}
+
+
+_BUILTIN_PIPELINES_PACKAGE = "sglang.multimodal_gen.runtime.pipelines"
+
+
+def _builtin_pipeline_modules() -> List[str]:
+    package = importlib.import_module(_BUILTIN_PIPELINES_PACKAGE)
+    return [
+        module_name
+        for _, module_name, ispkg in pkgutil.walk_packages(
+            package.__path__, package.__name__ + "."
+        )
+        if not ispkg
+    ]
+
+
+def _register_pipeline_module(module_name: str) -> None:
+    try:
+        pipeline_module = importlib.import_module(module_name)
+    except Exception as exc:
+        logger.warning(
+            "Skipping pipeline module %s during discovery due to import failure: %s",
+            module_name,
+            exc,
+        )
+        logger.debug(
+            "Pipeline import failure details for %s",
+            module_name,
+            exc_info=True,
+        )
+        return
+    if not hasattr(pipeline_module, "EntryClass"):
+        return
+    from sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base import (
+        ComposedPipelineBase,
+    )
+
+    entry_cls = pipeline_module.EntryClass
+    entry_cls_list = [entry_cls] if not isinstance(entry_cls, list) else entry_cls
+
+    for cls in entry_cls_list:
+        if not issubclass(cls, ComposedPipelineBase):
+            continue
+        if _PIPELINE_REGISTRY.get(cls.pipeline_name, cls) is not cls:
+            logger.warning(
+                f"Duplicate pipeline name '{cls.pipeline_name}' found. Overwriting."
+            )
+        _PIPELINE_REGISTRY[cls.pipeline_name] = cls
+
+        # Special handling for ComfyUI Pipelines:
+        # Auto-register config classes if Pipeline class has them defined
+        # since comfyui get model from a single weight file, so we need to register the config classes here
+        if hasattr(cls, "pipeline_config_cls") and hasattr(cls, "sampling_params_cls"):
+            _PIPELINE_CONFIG_REGISTRY[cls.pipeline_name] = (
+                cls.pipeline_config_cls,
+                cls.sampling_params_cls,
+            )
 
 
 def _discover_and_register_pipelines():
@@ -83,55 +144,60 @@ def _discover_and_register_pipelines():
         return
 
     with defer_full_gc_for_imports():
-        package_name = "sglang.multimodal_gen.runtime.pipelines"
-        package = importlib.import_module(package_name)
+        module_names = _builtin_pipeline_modules()
         _BUILTIN_PIPELINES_DISCOVERED = True
-
-        for _, module_name, ispkg in pkgutil.walk_packages(
-            package.__path__, package.__name__ + "."
-        ):
-            if not ispkg:
-                try:
-                    pipeline_module = importlib.import_module(module_name)
-                except Exception as exc:
-                    logger.warning(
-                        "Skipping pipeline module %s during discovery due to import failure: %s",
-                        module_name,
-                        exc,
-                    )
-                    logger.debug(
-                        "Pipeline import failure details for %s",
-                        module_name,
-                        exc_info=True,
-                    )
-                    continue
-                if hasattr(pipeline_module, "EntryClass"):
-                    entry_cls = pipeline_module.EntryClass
-                    entry_cls_list = (
-                        [entry_cls] if not isinstance(entry_cls, list) else entry_cls
-                    )
-
-                    for cls in entry_cls_list:
-                        if not issubclass(cls, ComposedPipelineBase):
-                            continue
-                        if cls.pipeline_name in _PIPELINE_REGISTRY:
-                            logger.warning(
-                                f"Duplicate pipeline name '{cls.pipeline_name}' found. Overwriting."
-                            )
-                        _PIPELINE_REGISTRY[cls.pipeline_name] = cls
-
-                        # Special handling for ComfyUI Pipelines:
-                        # Auto-register config classes if Pipeline class has them defined
-                        # since comfyui get model from a single weight file, so we need to register the config classes here
-                        if hasattr(cls, "pipeline_config_cls") and hasattr(
-                            cls, "sampling_params_cls"
-                        ):
-                            _PIPELINE_CONFIG_REGISTRY[cls.pipeline_name] = (
-                                cls.pipeline_config_cls,
-                                cls.sampling_params_cls,
-                            )
+        for module_name in module_names:
+            _register_pipeline_module(module_name)
     logger.debug(
         f"Registering pipelines complete, {len(_PIPELINE_REGISTRY)} pipelines registered"
+    )
+
+
+@lru_cache(maxsize=None)
+def _builtin_pipeline_module(pipeline_class_name: str) -> Optional[str]:
+    """The builtin module whose source declares ``pipeline_class_name``.
+
+    Every pipeline module imports its models and stages, so a server reads the
+    sources to find the one pipeline it serves instead of importing them all.
+    """
+    declaration = re.compile(
+        r"""\bpipeline_name\s*(?::[^=\n]+)?=\s*["']"""
+        + re.escape(pipeline_class_name)
+        + r"""["']"""
+    )
+    for module_name in _builtin_pipeline_modules():
+        with open(importlib.util.find_spec(module_name).origin, encoding="utf-8") as f:
+            if declaration.search(f.read()):
+                return module_name
+    return None
+
+
+def _ensure_pipeline_registered(pipeline_class_name: str) -> None:
+    """Register one pipeline, importing only the builtin module that declares it.
+    A name no builtin source declares falls back to discovering every pipeline."""
+    load_external_model_package()
+    if pipeline_class_name in _PIPELINE_REGISTRY:
+        return
+    if not _BUILTIN_PIPELINES_DISCOVERED:
+        module_name = _builtin_pipeline_module(pipeline_class_name)
+        if module_name is not None:
+            with defer_full_gc_for_imports():
+                _register_pipeline_module(module_name)
+    if pipeline_class_name not in _PIPELINE_REGISTRY:
+        _discover_and_register_pipelines()
+
+
+def _has_pipeline(pipeline_class_name: str) -> bool:
+    """Whether a pipeline is registered or declared by a builtin module, without
+    importing a module that only declares it."""
+    load_external_model_package()
+    return (
+        pipeline_class_name in _PIPELINE_REGISTRY
+        or (
+            not _BUILTIN_PIPELINES_DISCOVERED
+            and _builtin_pipeline_module(pipeline_class_name) is not None
+        )
+        or get_pipeline_class(pipeline_class_name) is not None
     )
 
 
@@ -146,16 +212,15 @@ def get_pipeline_config_classes(
     """
     Get the configuration classes for a pipeline.
     """
-    # Ensure pipelines are discovered first
-    _ensure_registry_initialized()
+    _ensure_pipeline_registered(pipeline_class_name)
     return _PIPELINE_CONFIG_REGISTRY.get(pipeline_class_name)
 
 
 def get_pipeline_class(
     pipeline_class_name: str,
-) -> Type[ComposedPipelineBase] | None:
+) -> Type["ComposedPipelineBase"] | None:
     """Get a registered pipeline class by name."""
-    _ensure_registry_initialized()
+    _ensure_pipeline_registered(pipeline_class_name)
     return _PIPELINE_REGISTRY.get(pipeline_class_name)
 
 
@@ -253,7 +318,7 @@ def register_configs(
 
 
 def register_pipeline(
-    pipeline_cls: Type[ComposedPipelineBase],
+    pipeline_cls: Type["ComposedPipelineBase"],
     *,
     sampling_param_cls: Any,
     pipeline_config_cls: Type[PipelineConfig],
@@ -262,6 +327,10 @@ def register_pipeline(
     overwrite: bool = False,
 ) -> None:
     """Register an out-of-tree native diffusion pipeline and its configs."""
+    from sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base import (
+        ComposedPipelineBase,
+    )
+
     _discover_and_register_pipelines()
     if not issubclass(pipeline_cls, ComposedPipelineBase):
         raise TypeError("pipeline_cls must inherit from ComposedPipelineBase")
@@ -538,9 +607,23 @@ class ModelInfo:
     diffusers model within this framework.
     """
 
-    pipeline_cls: Type[ComposedPipelineBase]
     sampling_param_cls: Any
     pipeline_config_cls: Type[PipelineConfig]
+    # A native pipeline is kept by name until it is used: importing it imports
+    # its models, which resolving the server arguments does not need.
+    pipeline: Union[Type["ComposedPipelineBase"], str]
+
+    @property
+    def pipeline_cls(self) -> Type["ComposedPipelineBase"]:
+        if not isinstance(self.pipeline, str):
+            return self.pipeline
+        pipeline_cls = get_pipeline_class(self.pipeline)
+        if pipeline_cls is None:
+            raise ValueError(
+                f"Pipeline class '{self.pipeline}' could not be imported; "
+                "see the discovery warning above."
+            )
+        return pipeline_cls
 
 
 def _get_diffusers_model_info(
@@ -587,9 +670,9 @@ def _get_diffusers_model_info(
                 )
 
     return ModelInfo(
-        pipeline_cls=DiffusersPipeline,
         sampling_param_cls=sampling_param_cls,
         pipeline_config_cls=pipeline_config_cls,
+        pipeline=DiffusersPipeline,
     )
 
 
@@ -684,8 +767,7 @@ def get_model_info(
                 )
             return None
 
-    pipeline_cls = get_pipeline_class(pipeline_class_name)
-    if not pipeline_cls:
+    if not _has_pipeline(pipeline_class_name):
         if backend == Backend.AUTO:
             logger.warning(
                 f"Pipeline class '{pipeline_class_name}' specified in '{model_path}' has no native sglang support. "
@@ -721,9 +803,9 @@ def get_model_info(
     # 4. Combine and return the complete model info
     logger.debug("Using native sglang backend for model '%s'", model_path)
     model_info = ModelInfo(
-        pipeline_cls=pipeline_cls,
         sampling_param_cls=config_info.sampling_param_cls,
         pipeline_config_cls=config_info.pipeline_config_cls,
+        pipeline=pipeline_class_name,
     )
     logger.debug(f"Found model info: {model_info}")
 

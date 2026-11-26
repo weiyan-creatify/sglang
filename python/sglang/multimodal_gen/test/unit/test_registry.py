@@ -60,6 +60,50 @@ def test_metadata_lookups_do_not_discover_native_pipelines(monkeypatch):
     assert info.sampling_param_cls is QwenImageSamplingParams
 
 
+def test_native_model_info_imports_only_its_own_pipeline(tmp_path, monkeypatch):
+    monkeypatch.setattr(registry, "_PIPELINE_REGISTRY", {})
+    monkeypatch.setattr(
+        registry, "_PIPELINE_CONFIG_REGISTRY", dict(registry._PIPELINE_CONFIG_REGISTRY)
+    )
+    monkeypatch.setattr(registry, "_BUILTIN_PIPELINES_DISCOVERED", False)
+
+    def unexpected_discovery():
+        pytest.fail("Serving one model must not import every native pipeline")
+
+    imported = []
+    register_pipeline_module = registry._register_pipeline_module
+
+    def record(module_name):
+        imported.append(module_name)
+        register_pipeline_module(module_name)
+
+    monkeypatch.setattr(
+        registry, "_discover_and_register_pipelines", unexpected_discovery
+    )
+    monkeypatch.setattr(registry, "_register_pipeline_module", record)
+    path = _checkpoint_dir(
+        tmp_path / "models--Qwen--Qwen-Image" / "snapshots",
+        index_class="QwenImagePipeline",
+    )
+    info = registry.get_model_info(path)
+    assert info.sampling_param_cls is QwenImageSamplingParams
+    assert imported == []
+    assert info.pipeline_cls.pipeline_name == "QwenImagePipeline"
+    assert imported == [info.pipeline_cls.__module__]
+
+
+def test_every_builtin_pipeline_is_found_from_its_source():
+    registry._ensure_registry_initialized()
+    builtins = {
+        name: cls
+        for name, cls in registry._PIPELINE_REGISTRY.items()
+        if cls.__module__.startswith(registry._BUILTIN_PIPELINES_PACKAGE + ".")
+    }
+    assert builtins
+    for name, cls in builtins.items():
+        assert registry._builtin_pipeline_module(name) == cls.__module__, name
+
+
 @pytest.mark.parametrize("modular_class", [None, "SomeModularPipeline"])
 def test_detectors_are_probed_with_the_modular_pipeline_class(
     tmp_path, monkeypatch, modular_class
